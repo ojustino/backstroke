@@ -1,9 +1,10 @@
 from datetime import datetime, timedelta
 from portfolio_maker import PortfolioMaker
-import copy
+import matplotlib as mpl
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import pickle
 import requests
 import time
 
@@ -25,27 +26,6 @@ class HistoricalSimulator():
             raise ValueError('The first argument of HistoricalSimulator() must '
                              'be a PortfolioMaker() instance.')
 
-        # estimate period needed to warm up strategy's statistic(s) (converting
-        # real days to approx. market days) and subtract result from start_date
-        mkt_to_real_days = 365.25 / 252.75 # denominator is avg mkt days in year
-        buffer_days = int(self.burn_in * mkt_to_real_days) + 5
-        self.open_date = start_date - timedelta(buffer_days)
-
-        # save dates over which analysis will take place
-        self.start_date = start_date
-        self.end_date = end_date
-
-        # save the core and satellite fractions
-        self.core_frac = np.round(Portfolio._get_label_weights('core').sum(),6)
-        self.sat_frac = np.round(1 - self.core_frac, 6)
-
-        # how much money do we have to invest?
-        # (is a property so an error is thrown if it goes negative)
-        self._cash = float(cash)
-
-        # validate proposed asset dictionary, then add historical data to it
-        self.assets = self._validate_assets_dict(Portfolio)
-
         # how often a year should we rebalance the satellite portion?
         # and, how often a year should we rebalance the whole portfolio?
         if sat_rb_freq < tot_rb_freq:
@@ -60,6 +40,29 @@ class HistoricalSimulator():
         self.sat_rb_freq = sat_rb_freq
         self.tot_rb_freq = tot_rb_freq
 
+        # estimate period needed to warm up strategy's statistic(s) (converting
+        # real days to approx. market days) and subtract result from start_date
+        mkt_to_real_days = 365.25 / 252.75 # denominator is avg mkt days in year
+        buffer_days = int(self.burn_in * mkt_to_real_days) + 5
+        self.open_date = start_date - timedelta(buffer_days)
+
+        # save dates over which analysis will take place
+        self.start_date = start_date
+        self.end_date = end_date
+
+        # save the core and satellite fractions
+        self.core_frac = np.round(Portfolio._get_label_weights('core').sum(),6)
+        self.sat_frac = np.round(1 - self.core_frac, 6)
+
+        # track remaining money in main and benchmark portfolios
+        # (are properties, so an error is thrown if they go negative)
+        self._cash = float(cash)
+        self._bench_cash = self._cash
+        self._starting_cash = self._cash
+
+        # validate proposed asset dictionary, then add historical data to it
+        self.assets = self._validate_assets_dict(Portfolio)
+
         # make arrays of all dates in set and all *active* dates (w/o burn-in)
         self.all_dates, self.active_dates = self._get_date_arrays()
 
@@ -67,28 +70,37 @@ class HistoricalSimulator():
         # and, are those are they for the satellite only or the whole portfolio?
         self.rb_indices, self.sat_only = self._calc_rebalance_info()
 
-        # make a DataFrame to track portfolio value over time
-        self.strategy_results = pd.DataFrame({'date': self.active_dates,
-                                              'value': np.zeros(len(self.active_dates))})
+        # make DataFrames to track main and benchmark portfolio values over time
+        self.strategy_results = pd.DataFrame({
+            'date': self.active_dates,
+            'value': np.zeros(len(self.active_dates))})
+        self.bench_results = self.strategy_results.copy()
+
+        # make DataFrames to track portfolios that are 100% core and 100% sat
         if self.sat_frac > 0:
             self.satellite_results = self.strategy_results.copy()
         if self.core_frac > 0:
             self.core_results = self.strategy_results.copy()
 
+        # make DataFrame to track free cash in main portfolio over time
         self.cash_over_time = self.strategy_results.copy()
 
-        # where in the time loop are we?
+        # track the current simulation date
         self.today = self.open_date
 
-        # save convenience lists of core and satellite asset names
+        # save convenience lists of core, satellite, and benchmark asset names
         self.core_names = [key for key, info in self.assets.items()
                            if info['label'] == 'core']
+
         in_mkt_nm = [key for key, info in self.assets.items()
                      if info['label'] == 'satellite' and info['in_mkt']]
         out_mkt_nm = [key for key, info in self.assets.items()
                      if info['label'] == 'satellite' and not info['in_mkt']]
         self.sat_names = in_mkt_nm + out_mkt_nm
         # (for satellite assets, make sure the in-market asset comes first)
+
+        self.bench_names = [key for key, info in self.assets.items()
+                            if info['label'] == 'benchmark']
 
         # run the loop?
 
@@ -99,41 +111,62 @@ class HistoricalSimulator():
     @cash.setter
     def cash(self, value):
         if value < 0:
-            raise ValueError('You cannot spend more cash than you have.')
+            raise ValueError('More cash was spent than remains'
+                             ' in main portfolio.')
         self._cash = value
 
-    def portfolio_value(self, rebalancing=False, ind_all=None):
+    @property
+    def bench_cash(self):
+        return self._bench_cash
+
+    @bench_cash.setter
+    def bench_cash(self, value):
+        if value < 0:
+            raise ValueError('More cash was spent than remains '
+                             'in benchmark portfolio.')
+        self._bench_cash = value
+
+    def portfolio_value(self, ind_all=None,
+                        main_portfolio=True, rebalance=False):
         '''
         Return the value of all assets currently held in the portfolio,
         including cash.
 
-        If `rebalancing` == False, asset prices use the current day's
-        (`self.today`) closing price, and if `rebalancing` == True, then
-        assets are valuated using the current day's opening price.
+        `ind_all` is the integer index of each ticker's historical DataFrame
+        from which to get the price data.
 
-        `ind_all` is the index of each ticker's historical DataFrame from which
-        to get the price data.
+        If `main_portfolio` == True (default), the method returns the value of
+        main strategy's core/satellite portfolio. If `main_portfolio` == False,
+        the method returns the value of the benchmark portfolio.
 
-        MAY NEED TO ADD AN ARGUMENT FOR BENCHMARK AS WELL
+        If `rebalance` == False (default), asset prices use the current day's
+        (`self.today`) closing price, and if `rebalance` == True, then assets
+        are valuated using the current day's opening price.
         '''
-        if self.today < self.start_date:
-            return self.cash
+        if not isinstance(rebalance, bool):
+            raise ValueError("'rebalance' must be a bool.")
 
-        if not isinstance(rebalancing, bool):
-            raise ValueError("'rebalancing' must be a bool.")
+        # get remaining cash for the chosen portfolio
+        cash = self.cash if main_portfolio else self.bench_cash
+
+        # if current sim hasn't reached the first trading date, return cash only
+        if self.today < self.start_date:
+            return cash
 
         # IF ind_all == None do something else... but what???
 
         # determine whether to use open or close prices for assets
-        #assets = self.assets
-        col = 'adjOpen' if rebalancing else 'adjClose'
+        col = 'adjOpen' if rebalance else 'adjClose'
+
+        # collect labels for assets in the chosen portfolio
+        labels = {'core', 'satellite'} if main_portfolio else {'benchmark'}
 
         # multiply shares held of each ticker by their current prices
         holdings = np.sum([info['shares'] * info['df'][col][ind_all]
                            for info in self.assets.values()
-                           if info['label'] in ['core', 'satellite']])
+                           if info['label'] in labels])
 
-        return self.cash + holdings
+        return cash + holdings
 
     def call_tiingo(self, tick, open_date, end_date=datetime.now()):
         '''
@@ -211,7 +244,9 @@ class HistoricalSimulator():
         self._verify_dates(Portfolio.tick_info)
 
         # if those tests pass, fetch historical data from online for each asset
-        assets = copy.deepcopy(Portfolio.assets)
+        assets = pickle.loads(pickle.dumps(Portfolio.assets, -1))
+        # (faster than copy.deepcopy for this use case)
+
         for tick, info in assets.items():
             # get daily open/close data from Tiingo
             df = self.call_tiingo(tick, self.open_date, self.end_date)
@@ -223,10 +258,8 @@ class HistoricalSimulator():
             info['shares'] = 0
 
         # ensure that each asset has the same number of dates
-        assert len(np.unique([len(assets[nm]['df']['date'])
-                              for nm in assets])) == 1, ('some ticker '
-                                                         'DataFrames are '
-                                                         'missing dates')
+        num_dates = np.unique([len(assets[nm]['df']['date']) for nm in assets])
+        assert len(num_dates) == 1, 'some ticker DataFrames are missing dates'
 
         return assets
 
@@ -259,7 +292,7 @@ class HistoricalSimulator():
     def _append_or_assign(self, obj, ind, sat_only_is=None):
         '''
         Called in _calc_rebalance_info(). `rb_indices` and `sat_only` can start
-        out as lists or arrays, This method handles that ambiguity by first
+        out as lists or arrays. This method handles that ambiguity by first
         trying to append argument `ind` to `obj`. This is the case where
         `rb_indices` and `sat_only` grow one item at a time.
 
@@ -307,7 +340,7 @@ class HistoricalSimulator():
         # get total rebalance months, shifting list to include start month
         tot_mths = all_months[all_months % (12 / self.tot_rb_freq) == 0]
         tot_mths = (tot_mths + self.start_date.month) % 12
-        tot_mths[tot_mths == 0] += 12 # or else december would be 0
+        tot_mths[tot_mths == 0] = 12 # or else december would be 0
 
         # choose satellite rebalance strategy based on frequency
         if self.sat_rb_freq <= 12: # if monthly or less freqent...
@@ -325,7 +358,7 @@ class HistoricalSimulator():
             rb_indices = []
             sat_only = []
 
-        else: # if daily... (only. later could include every 2nd/3rd day, etc.)
+        else: # if daily... (only. in future could do every 2, 3 days and so on)
             # ...then every month has rebalance events
             sat_mths = all_months
             print('sat', sat_mths, '\ntot', tot_mths)
@@ -335,7 +368,7 @@ class HistoricalSimulator():
             rb_indices = np.arange(len(self.active_dates))
             sat_only = np.ones(len(self.active_dates)).astype(bool)
 
-        go = time.time()
+        #go = time.time()
         yr = self.start_date.year
         while yr <= self.end_date.year:
             # make array with all eligible months
@@ -370,8 +403,7 @@ class HistoricalSimulator():
                                                       sat_only_is=kind)
 
             yr += 1
-
-        print(f"{time.time() - go:.3f} s for rebalance info loop")
+        #print(f"{time.time() - go:.3f} s for rebalance info loop")
 
         # make arrays and shift rb_indices to account for burn-in days
         rb_indices = np.array(rb_indices) + self.burn_in
@@ -379,13 +411,109 @@ class HistoricalSimulator():
 
         return rb_indices, sat_only
 
+    def _get_static_rb_changes(self, names, ind_all, main_portfolio=True):
+        '''
+        Called in `rebalance_portfolio()`.
+
+        Returns an array with the changes in shares for the tickers in `names`
+        needed to rebalance the portfolio in question. The method name refers
+        to "static" assets because it only works for assets whose target
+        portfolio percentage does not change -- core or benchmark.
+
+        `ind_all` is the integer index of each ticker's historical DataFrame
+        from which to get the price data.
+
+        `names` is a list of assets who share the same label; it should
+        typically either be `self.core_names` or `self.bench_names`.
+
+        `main_portfolio` decides whether to find changes for the main
+        strategy's core/satellite portfolio (True) or the benchmark portfolio
+        (False).
+        '''
+        # get total value for portfolio in question
+        pf_value = self.portfolio_value(ind_all, main_portfolio=main_portfolio,
+                                        rebalance=True)
+
+        # get share changes for assets in `names`
+        deltas = []
+        for name in names:
+            ideal_frac = self.assets[name]['fraction']
+            ideal_holdings = pf_value * ideal_frac
+
+            curr_price = self.assets[name]['df']['adjOpen'][ind_all]
+            curr_held = self.assets[name]['shares'] * curr_price
+
+            delta_shares = (ideal_holdings - curr_held) // curr_price
+            deltas.append(delta_shares)
+
+        return deltas
+
+    def _make_rb_trades(self, names, deltas, ind_all, main_portfolio=True):
+        '''
+        Called in `rebalance_portfolio()` or the child Strategy class'
+        `rebalance_satellite()`.
+
+        Completes the transactions needed to rebalance a portfolio.
+
+        `names` is an array of assets to rebalance. It should typically be
+        `np.array(self.core_names + self.sat_names)` (if called from
+        rebalance_portfolio()), `np.array(self.sat_names)` alone (if called from
+        rebalance_satellite()), or `np.array(self.bench_names)` (if called from
+        rebalance_portfolio() for the benchmark portfolio).
+
+        `deltas` is an array with the corresponding share changes for the
+        assets in `names`.
+
+        `ind_all` is the integer index of each ticker's historical DataFrame
+        from which to get the price data.
+
+        `main_portfolio` decides whether to find changes for the main
+        strategy's core/satellite portfolio (True) or the benchmark portfolio
+        (False).
+        '''
+        # only print transaction info for main portfolio trades
+        my_pr = lambda st: print(st) if main_portfolio else None
+
+        # get remaining cash for the chosen portfolio
+        cash = self.cash if main_portfolio else self.bench_cash
+
+        # once we have deltas for all assets, find which require sells/buys
+        to_sell = np.where(deltas < 0)[0]
+        to_buy = np.where(deltas > 0)[0] # no action needed when deltas == 0
+
+        # gather all prices in an array that corresponds with deltas
+        prices = np.array([self.assets[nm]['df']['adjOpen'][ind_all]
+                           for nm in names])
+
+        # first, sell symbols that are currently overweighted in portfolio
+        for i, nm in enumerate(names[to_sell]):
+            share_change = deltas[to_sell[i]] # this is negative, so...
+            cash -= prices[to_sell[i]] * share_change # ...increases $$
+            my_pr(f"sold {abs(share_change):.0f} shares of {nm} "
+                  f"@${prices[to_sell[i]]:.2f} | ${cash:.2f} in account")
+            self.assets[nm]['shares'] += share_change # ...decreases shares
+
+        # then, buy underweighted symbols
+        for i, nm in enumerate(names[to_buy]):
+            share_change = deltas[to_buy[i]]
+            cash -= prices[to_buy[i]] * share_change
+            my_pr(f"bought {share_change:.0f} shares of {nm} "
+                  f"@${prices[to_buy[i]]:.2f} | ${cash:.2f} in account")
+            self.assets[nm]['shares'] += share_change
+
+        # update portfolio's cash value
+        if main_portfolio:
+            self.cash = cash
+        else:
+            self.bench_cash = cash
+
     def rebalance_portfolio(self, ind_all, ind_active, curr_rb_ind):
         '''
         Called in `self.begin_time_loop()`.
 
         General method that performs a whole-portfolio rebalance by
         re-weighting core assets in-method and gets needed changes for
-        satellite assets from rebalance_satellite(). Then, completes the
+        satellite assets from child's rebalance_satellite(). Then, completes the
         transactions needed to restore balance.
 
         The hope is that this method can work with any strategy by outsourcing
@@ -394,53 +522,33 @@ class HistoricalSimulator():
         target weights for the core will not change over time and that total
         rebalances should always try to bring the portfolio back to them.
 
-        If that changes, perhaps add a rebalance_core() method?
+        If that changes, perhaps add a specialized rebalance_core() method?
         '''
         print(f"it's a total; sat_only is {self.sat_only[curr_rb_ind]}; "
               f"${self.cash:.2f} in account")
 
         # get share changes for core assets
-        deltas = []
-        for core in self.core_names:
-            ideal_frac = self.assets[core]['fraction']
-            ideal_holdings = self.portfolio_value(True, ind_all) * ideal_frac
+        deltas = self._get_static_rb_changes(self.core_names, ind_all)
 
-            curr_price = self.assets[core]['df']['adjOpen'][ind_all]
-            curr_held = self.assets[core]['shares'] * curr_price
-
-            delta_shares = (ideal_holdings - curr_held) // curr_price
-            deltas.append(delta_shares)
-
-        # get satellite assets' net share changes from their dedicated method
+        # get share changes for satellite assets from child's method
         deltas.extend(self.rebalance_satellite(ind_all, ind_active,
                                                curr_rb_ind))
-        deltas = np.array(deltas)
+        deltas = np.array(deltas).astype(int)
         print('deltas:', deltas)
 
-        # once we have deltas for all assets, find which require sells/buys
-        to_sell = np.where(deltas < 0)[0]
-        to_buy = np.where(deltas > 0)[0] # no action needed when deltas == 0
+        # rebalance the main (core/satellite) strategy's portfolio
+        main_names = np.array(self.core_names + self.sat_names)
+        self._make_rb_trades(main_names, deltas, ind_all)
 
-        # gather all names and prices in arrays that correspond with delta
-        all_names = np.array(self.core_names + self.sat_names)
-        prices = np.array([self.assets[nm]['df']['adjOpen'][ind_all]
-                           for nm in all_names])
+        # next, get share changes for benchmark assets (CHECK FOR EXISTENCE?)
+        bench_deltas = self._get_static_rb_changes(self.bench_names, ind_all,
+                                                   main_portfolio=False)
+        bench_deltas = np.array(bench_deltas).astype(int)
 
-        # first, sell symbols that are currently overweighted in portfolio
-        for i, nm in enumerate(all_names[to_sell]):
-            share_change = deltas[to_sell[i]] # this is negative, so...
-            self.cash -= prices[to_sell[i]] * share_change # ...increases $$
-            print(f"sold {abs(share_change):.0f} shares of {nm} "
-                  f"@${prices[to_sell[i]]:.2f} | ${self.cash:.2f} in account")
-            self.assets[nm]['shares'] += share_change # ...decreases shares
-
-        # then, buy underweighted symbols
-        for i, nm in enumerate(all_names[to_buy]):
-            share_change = deltas[to_buy[i]]
-            self.cash -= prices[to_buy[i]] * share_change
-            print(f"bought {share_change:.0f} shares of {nm} "
-                  f"@${prices[to_buy[i]]:.2f} | ${self.cash:.2f} in account")
-            self.assets[nm]['shares'] += share_change
+        # rebalance the benchmark portfolio
+        bench_names = np.array(self.bench_names)
+        self._make_rb_trades(bench_names, bench_deltas, ind_all,
+                             main_portfolio=False)
 
     def begin_time_loop(self):
         '''
@@ -450,8 +558,14 @@ class HistoricalSimulator():
         rebalancing the portfolio along the way. Buy at open, track stats at
         close.
         '''
-        go = time.time()
+        # make lists to track values over time
+        to_strategy_results = []
+        to_bench_results = []
+        to_cash_over_time = []
+
+        # run the simulation
         curr_rb_ind = 0
+        go = time.time()
         for i, today in enumerate(self.all_dates):
             self.today = pd.to_datetime(today)
             # "PRE-OPEN": update daily indicators based on YESTERDAY's CLOSES
@@ -483,12 +597,99 @@ class HistoricalSimulator():
 
             # AT CLOSE: track stats
             if i >= self.burn_in:
-                # this is slow... any way to speed it up?
-                # maybe add values to a 1-D array and then join it with
-                # active_dates in DataFrame after the loop is complete???
-                # also, look here: https://stackoverflow.com/a/45983830
-                curr_pf_val = self.portfolio_value(False, i)
-                self.strategy_results.loc[i-self.burn_in, 'value'] = curr_pf_val
-                self.cash_over_time.loc[i-self.burn_in, 'value'] = self.cash
+                # save the main core/satellite portfolio's value at day's close
+                pf_value = self.portfolio_value(i, rebalance=False)
+                to_strategy_results.append(pf_value)
+
+                # save the benchmark portfolio's value at day's close
+                bench_pf_value = self.portfolio_value(i, main_portfolio=False,
+                                                      rebalance=False)
+                to_bench_results.append(bench_pf_value)
+
+                # save amount of free cash left in the main portfolio
+                to_cash_over_time.append(self.cash)
+
+                # tried assigning to DataFrames with .loc on advice from
+                # https://stackoverflow.com/a/45983830
+                # turns out it's the fastest pandas assignment method, but list
+                # append and numpy array assignment are 200x faster in this case
 
         print(f"{time.time() - go:.3f} s for time loop")
+
+        # fill in the DataFrames tracking different values over time
+        self.strategy_results['value'] = to_strategy_results
+        self.bench_results['value'] = to_bench_results
+        self.cash_over_time['value'] = to_cash_over_time
+
+    def plot_results(self, show_benchmark=True, logy=False, return_plot=False):
+        '''
+        View a plot of your strategy's performance after the simulation is done.
+
+        `show_benchmark` is a boolean that controls whether (True, default) or
+        not (False) to display the benchmark portfolio's performance for
+        purposes of comparison.
+
+        `logy` is a boolean that controls whether the y-axis (account value in
+        dollars) is on a logarithmic (True) or linear (False, default) scale.
+
+        `return_plot` is a boolean that returns the matplotlib figure the plot
+        is drawn on if there are other modifications you'd like to make to it.
+        It is False by default.
+        '''
+        # plot the main strategy's results
+        core_pct = self.core_frac * 1e2
+        sat_pct = self.sat_frac * 1e2
+        lw = 2.5 if len(self.active_dates) < 1000 else 2
+        ax = self.strategy_results.plot(x='date', y='value',
+                                        label=(f"{core_pct:.0f}% core, "
+                                               f"{sat_pct:.0f}% sat"),
+                                        figsize=(10,10), fontsize=14,
+                                        c='#beaa7c', lw=lw, logy=logy)
+        # https://www.color-hex.com/color/d4bd8a, darker shade
+
+        # print info on main final portfolio holdings and overall values
+        final = len(self.all_dates) - 1 # the last index of the value array
+        print('end date main portfolio value: '
+              f"${self.portfolio_value(final):,.02f}")
+
+        print('end date main portfolio holdings: ')
+        strategy_assets = {key:info for key, info in self.assets.items()
+                           if info['label'] != 'benchmark'}
+        for i, (key, info) in enumerate(strategy_assets.items()):
+            print(f"{key}: {info['shares']}",
+                  end=(', ' if i != len(strategy_assets) - 1 else '\n\n'))
+
+        # plot the benchmark strategy's results and print info, if requested
+        if show_benchmark:
+            self.bench_results.plot(x='date', y='value', label='benchmark',
+                                    lw=lw, c='#82b6a5', ax=ax)
+            # https://www.color-hex.com/color/b7e4cf, darker shade
+
+            print('end date benchmark portfolio value: '
+                  f"${self.portfolio_value(final, main_portfolio=False):,.02f}")
+
+            print('end date benchmark portfolio holdings: ')
+            bench_assets = {key:info for key, info in self.assets.items()
+                            if info['label'] == 'benchmark'}
+            for i, (key, info) in enumerate(bench_assets.items()):
+                print(f"{key}: {info['shares']}",
+                      end=(', ' if i != len(bench_assets) - 1 else '\n\n'))
+
+        # modify some plot settings
+        ax.legend(fontsize=14)
+        plt.axhline(self._starting_cash, linestyle='--', c='k', alpha=.5)
+        ax.grid()
+
+        # add dollar signs and comma separators to y ticks
+        # (adapted from https://stackoverflow.com/a/25973637 and
+        #  https://stackoverflow.com/a/10742904)
+        ax.get_yaxis().set_major_formatter(
+            mpl.ticker.FuncFormatter(lambda x, _: f"${x:,.0f}"))
+        ax.get_yaxis().set_minor_formatter(
+            mpl.ticker.FuncFormatter(lambda x, _: f"${x:,.0f}"))
+
+        # return the figure, if requested
+        if return_plot:
+            return ax.figure
+
+        plt.show()

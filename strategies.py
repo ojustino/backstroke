@@ -134,72 +134,69 @@ class SMAStrategy(HistoricalSimulator):
         out_mkt_pr = self.assets[out_mkt_tick]['df']['adjOpen'][ind_all]
         out_mkt_sh = self.assets[out_mkt_tick]['shares']
 
-        total_mkt_val = self.portfolio_value(True, ind_all)
+        total_mkt_val = self.portfolio_value(ind_all, rebalance=True)
 
         print(f"it's a satellite; sat_only is {self.sat_only[curr_rb_ind]}; "
               f"${self.cash:.2f} in account")
         # with enough consecutive days above SMA (and a buffer, if necessary)...
-        if self.can_enter:# and self.active:
+        if self.can_enter:
             # switch to in-market asset if not already there
             if out_mkt_sh > 0:
                 # liquidate out_mkt holdings
-                self.cash += out_mkt_pr * out_mkt_sh
-                self.assets[out_mkt_tick]['shares'] = 0
-                print(f"sold {out_mkt_sh:.0f} shares of {out_mkt_tick} "
-                      f"@{out_mkt_pr:.2f} | ${self.cash:.2f} in account")
+                out_mkt_delta = -out_mkt_sh
+                out_mkt_cash = out_mkt_sh * out_mkt_pr
 
                 if self.sat_only[curr_rb_ind]: # use all available $$ to buy in
                     print('1: liq out, buy in')
-                    in_mkt_sh = self.cash // in_mkt_pr
-                    self.assets[in_mkt_tick]['shares'] = in_mkt_sh
-                    self.cash -= in_mkt_pr * in_mkt_sh
-                    print(f"bought {in_mkt_sh:.0f} shares of {in_mkt_tick} "
-                          f"@{in_mkt_pr:.2f} | ${self.cash:.2f} in account")
+                    in_mkt_delta = int((self.cash + out_mkt_cash) // in_mkt_pr)
                 else: # if total rebalance, re-weight and return shares to buy
                     print('2: liq out, balance in')
-                    delta = (total_mkt_val * self.sat_frac) // in_mkt_pr
-                    return [delta, 0]
+                    in_mkt_delta = (total_mkt_val * self.sat_frac) // in_mkt_pr
+                    return [in_mkt_delta, out_mkt_delta]
             # if already invested in in-market asset...
             else:
                 if self.sat_only[curr_rb_ind]: # already in, so nothing to buy
-                    print('3: already in, remain in')#pass
+                    print('3: already in, remain in')
+                    in_mkt_delta = out_mkt_delta = 0
                 else: # if total rebalance, find and return net share change
                     print('4: already in, balance in')
+                    out_mkt_delta = 0
                     in_hold_val = in_mkt_sh * in_mkt_pr
-                    delta = (total_mkt_val * self.sat_frac
-                             - in_hold_val) // in_mkt_pr
-                    return [delta, 0]
+                    in_mkt_delta = (total_mkt_val * self.sat_frac
+                                    - in_hold_val) // in_mkt_pr
+                    return [in_mkt_delta, out_mkt_delta]
         # without enough consecutive days above SMA or enough buffer...
         elif not self.can_enter:# and self.active:
             # retreat to out of market asset if not already there
             if in_mkt_sh > 0:
                 # liquidate in_mkt holdings
-                self.cash += in_mkt_pr * in_mkt_sh
-                self.assets[in_mkt_tick]['shares'] = 0
-                print(f"sold {in_mkt_sh:.0f} shares of {in_mkt_tick} "
-                      f"@{in_mkt_pr:.2f} | ${self.cash:.2f} in account")
+                in_mkt_delta = -in_mkt_sh
+                in_mkt_cash = in_mkt_sh * in_mkt_pr
 
                 if self.sat_only[curr_rb_ind]: # use all available $$ to retreat
                     print('5: liq in, buy out')
-                    out_mkt_sh = self.cash // out_mkt_pr
-                    self.assets[out_mkt_tick]['shares'] = out_mkt_sh
-                    self.cash -= out_mkt_pr * out_mkt_sh
-                    print(f"bought {out_mkt_sh:.0f} shares of {out_mkt_tick} "
-                          f"@{out_mkt_pr:.2f} | ${self.cash:.2f} in account")
+                    out_mkt_delta = int((self.cash + in_mkt_cash) // out_mkt_pr)
                 else: # if total rebalance, find and return net share change
                     print('6: liq in, balance out')
-                    delta = (total_mkt_val * self.sat_frac) // out_mkt_pr
-                    return [0, delta]
+                    out_mkt_delta = (total_mkt_val*self.sat_frac) // out_mkt_pr
+                    return [in_mkt_delta, out_mkt_delta]
             # if already invested in out-market asset...
             else:
                 if self.sat_only[curr_rb_ind]: # already out, so nothing to buy
-                    print('7: already out, remain out')#pass
+                    print('7: already out, remain out')
+                    in_mkt_delta = out_mkt_delta = 0
                 else: # if total rebalance, find and return net share change
                     print('8: already out, balance out')
+                    in_mkt_delta = 0
                     out_hold_val = out_mkt_sh * out_mkt_pr
-                    delta = (total_mkt_val * self.sat_frac
-                             - out_hold_val) // out_mkt_pr
-                    return [0, delta]
+                    out_mkt_delta = (total_mkt_val * self.sat_frac
+                                     - out_hold_val) // out_mkt_pr
+                    return [in_mkt_delta, out_mkt_delta]
+
+        # if this is a satellite-only rebalance, complete the trades
+        names = np.array(self.sat_names)
+        deltas = np.array([in_mkt_delta, out_mkt_delta]).astype(int)
+        self._make_rb_trades(names, deltas, ind_all)
 
 class VolTargetStrategy(HistoricalSimulator):
     def __init__(self, Portfolio, burn_in=30, vol_target=.15, **kwargs):
@@ -318,7 +315,7 @@ class VolTargetStrategy(HistoricalSimulator):
         out_mkt_val = out_mkt_pr * out_mkt_sh
 
         # What can i spend during this rebalance?
-        total_mkt_val = self.portfolio_value(True, ind_all)
+        total_mkt_val = self.portfolio_value(ind_all, rebalance=True)
         can_spend = ((in_mkt_val + out_mkt_val + self.cash)
                      if self.sat_only[curr_rb_ind]
                      else total_mkt_val * self.sat_frac)
@@ -360,30 +357,10 @@ class VolTargetStrategy(HistoricalSimulator):
         out_delta = (can_spend * new_pct_out - out_mkt_val) // out_mkt_pr
         deltas = [in_delta, out_delta]
 
-        # Return share delta values if this is an entire-portfolio rebalance
+        # Return share change values if this is an entire-portfolio rebalance
         if not self.sat_only[curr_rb_ind]:
             return deltas
-
-        # Otherwise, find which satellite assets require sells or buys
-        sat_names = np.array(self.sat_names)
-        prices = np.array([in_mkt_pr, out_mkt_pr])
-        deltas = np.array(deltas)
-        to_sell = np.where(deltas < 0)[0]
-        to_buy = np.where(deltas > 0)[0] # no action needed when deltas == 0
-
-        # Then, execute the necessary trades to match the new weightings
-        # (selling first hopefully leaves enough cash to buy afterward)
-        for i, nm in enumerate(sat_names[to_sell]):
-            share_change = deltas[to_sell[i]] # this is negative, so...
-            self.cash -= prices[to_sell[i]] * share_change # ...increases $$
-            print(f"sold {abs(share_change):.0f} shares of {nm} "
-                  f"@${prices[to_sell[i]]:.2f} | ${self.cash:.2f} in account")
-            self.assets[nm]['shares'] += share_change # ...decreases shares
-
-        # (then, buy)
-        for i, nm in enumerate(sat_names[to_buy]):
-            share_change = deltas[to_buy[i]]
-            self.cash -= prices[to_buy[i]] * share_change
-            print(f"bought {share_change:.0f} shares of {nm} "
-                  f"@${prices[to_buy[i]]:.2f} | ${self.cash:.2f} in account")
-            self.assets[nm]['shares'] += share_change
+        else: # If this is a satellite-only rebalance, make the trades
+            names = np.array(self.sat_names)
+            deltas = np.array(deltas).astype(int)
+            self._make_rb_trades(names, deltas, ind_all)
