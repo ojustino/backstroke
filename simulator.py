@@ -1,3 +1,4 @@
+#!/usr/bin/python3
 from datetime import datetime, timedelta
 from portfolio_maker import PortfolioMaker
 import matplotlib as mpl

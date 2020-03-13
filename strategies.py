@@ -1,3 +1,4 @@
+#!/usr/bin/python3
 from simulator import HistoricalSimulator
 from datetime import datetime, timedelta
 import matplotlib.pyplot as plt
