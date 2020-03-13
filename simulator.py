@@ -448,7 +448,8 @@ class HistoricalSimulator():
 
         return deltas
 
-    def _make_rb_trades(self, names, deltas, ind_all, main_portfolio=True):
+    def _make_rb_trades(self, names, deltas, ind_all, main_portfolio=True,
+                        verbose=False):
         '''
         Called in `rebalance_portfolio()` or the child Strategy class'
         `rebalance_satellite()`.
@@ -471,11 +472,8 @@ class HistoricalSimulator():
         strategy's core/satellite portfolio (True) or the benchmark portfolio
         (False).
         '''
-        # only print transaction info for main portfolio trades
-        my_pr = lambda st: print(st) if main_portfolio else None
-
-        # get remaining cash for the chosen portfolio
-        cash = self.cash if main_portfolio else self.bench_cash
+        my_pr = lambda *args, **kwargs: (print(*args, **kwargs)
+                                         if verbose else None)
 
         # once we have deltas for all assets, find which require sells/buys
         to_sell = np.where(deltas < 0)[0]
@@ -488,26 +486,29 @@ class HistoricalSimulator():
         # first, sell symbols that are currently overweighted in portfolio
         for i, nm in enumerate(names[to_sell]):
             share_change = deltas[to_sell[i]] # this is negative, so...
-            cash -= prices[to_sell[i]] * share_change # ...increases $$
-            my_pr(f"sold {abs(share_change):.0f} shares of {nm} "
-                  f"@${prices[to_sell[i]]:.2f} | ${cash:.2f} in account")
+            if main_portfolio:
+                self.cash -= prices[to_sell[i]] * share_change # ...increases $$
+                # only print transaction info for main portfolio
+                my_pr(f"sold {abs(share_change):.0f} shares of {nm} "
+                      f"@${prices[to_sell[i]]:.2f} | ${self.cash:.2f} in account")
+            else:
+                self.bench_cash -= prices[to_sell[i]] * share_change # ...$$ ^
             self.assets[nm]['shares'] += share_change # ...decreases shares
 
         # then, buy underweighted symbols
         for i, nm in enumerate(names[to_buy]):
             share_change = deltas[to_buy[i]]
-            cash -= prices[to_buy[i]] * share_change
-            my_pr(f"bought {share_change:.0f} shares of {nm} "
-                  f"@${prices[to_buy[i]]:.2f} | ${cash:.2f} in account")
+            if main_portfolio:
+                self.cash -= prices[to_buy[i]] * share_change
+                # only print transaction info for main portfolio
+                my_pr(f"bought {share_change:.0f} shares of {nm} "
+                      f"@${prices[to_buy[i]]:.2f} | ${self.cash:.2f} in account")
+            else:
+                self.bench_cash -= prices[to_buy[i]] * share_change
             self.assets[nm]['shares'] += share_change
 
-        # update portfolio's cash value
-        if main_portfolio:
-            self.cash = cash
-        else:
-            self.bench_cash = cash
-
-    def rebalance_portfolio(self, ind_all, ind_active, curr_rb_ind):
+    def rebalance_portfolio(self, ind_all, ind_active, curr_rb_ind,
+                            verbose=False):
         '''
         Called in `self.begin_time_loop()`.
 
@@ -524,7 +525,10 @@ class HistoricalSimulator():
 
         If that changes, perhaps add a specialized rebalance_core() method?
         '''
-        print(f"it's a total; sat_only is {self.sat_only[curr_rb_ind]}; "
+        my_pr = lambda *args, **kwargs: (print(*args, **kwargs)
+                                         if verbose else None)
+
+        my_pr(f"it's a total; sat_only is {self.sat_only[curr_rb_ind]}; "
               f"${self.cash:.2f} in account")
 
         # get share changes for core assets
@@ -532,13 +536,13 @@ class HistoricalSimulator():
 
         # get share changes for satellite assets from child's method
         deltas.extend(self.rebalance_satellite(ind_all, ind_active,
-                                               curr_rb_ind))
+                                               curr_rb_ind, verbose=verbose))
         deltas = np.array(deltas).astype(int)
-        print('deltas:', deltas)
+        my_pr('deltas:', deltas)
 
         # rebalance the main (core/satellite) strategy's portfolio
         main_names = np.array(self.core_names + self.sat_names)
-        self._make_rb_trades(main_names, deltas, ind_all)
+        self._make_rb_trades(main_names, deltas, ind_all, verbose=verbose)
 
         # next, get share changes for benchmark assets (CHECK FOR EXISTENCE?)
         bench_deltas = self._get_static_rb_changes(self.bench_names, ind_all,
@@ -548,16 +552,25 @@ class HistoricalSimulator():
         # rebalance the benchmark portfolio
         bench_names = np.array(self.bench_names)
         self._make_rb_trades(bench_names, bench_deltas, ind_all,
-                             main_portfolio=False)
+                             main_portfolio=False) # no printed output for now
 
-    def begin_time_loop(self):
+    def begin_time_loop(self, verbose=False):
         '''
         Called in __init__ of HistoricalSimulator or by user????
 
         Step through all avilable dates in the historical data set, tracking and
         rebalancing the portfolio along the way. Buy at open, track stats at
         close.
+
+        `verbose` is a boolean that controls whether or not to print the
+        simulation's progress over time.
+
+        MIGHT BE NICE TO BE ABLE TO PROVIDE A START DATE AND END DATE, CALCULATE REBALANCES BASED ON THOSE, THEN RUN THE SIMULATION OVER THAT SUBSET.
+        WOULD HAVE TO RE-RUN _calc_rebalance_info() IN HERE AND REMAKE rb_indices AND sat_only.
         '''
+        my_pr = lambda *args, **kwargs: (print(*args, **kwargs)
+                                         if verbose else None)
+
         # make lists to track values over time
         to_strategy_results = []
         to_bench_results = []
@@ -578,19 +591,21 @@ class HistoricalSimulator():
                 # which come at index [i - burn_in] of smas, stds, etc.
 
                 try:
-                    print('**** on', self.today.strftime('%Y-%m-%d'),
+                    my_pr('**** on', self.today.strftime('%Y-%m-%d'),
                           '\nvol streak: ', self.vol_streak,
                           'can enter:', self.can_enter,
                           'days out:', self.days_out)
                 except AttributeError:
-                    print('**** on', self.today.strftime('%Y-%m-%d'))
+                    my_pr('**** on', self.today.strftime('%Y-%m-%d'))
 
                 if self.sat_only[curr_rb_ind] == True:
                     # rebalance satellite portion
-                    self.rebalance_satellite(i, i - self.burn_in, curr_rb_ind)
+                    self.rebalance_satellite(i, i - self.burn_in, curr_rb_ind,
+                                             verbose=verbose)
                 else:
                     # rebalance total portfolio
-                    self.rebalance_portfolio(i, i - self.burn_in, curr_rb_ind)
+                    self.rebalance_portfolio(i, i - self.burn_in, curr_rb_ind,
+                                             verbose=verbose)
 
                 if curr_rb_ind < len(self.rb_indices) - 1:
                     curr_rb_ind += 1
@@ -614,14 +629,15 @@ class HistoricalSimulator():
                 # turns out it's the fastest pandas assignment method, but list
                 # append and numpy array assignment are 200x faster in this case
 
-        print(f"{time.time() - go:.3f} s for time loop")
+        my_pr(f"{time.time() - go:.3f} s for time loop")
 
         # fill in the DataFrames tracking different values over time
         self.strategy_results['value'] = to_strategy_results
         self.bench_results['value'] = to_bench_results
         self.cash_over_time['value'] = to_cash_over_time
 
-    def plot_results(self, show_benchmark=True, logy=False, return_plot=False):
+    def plot_results(self, show_benchmark=True, logy=False,
+                     return_plot=False, verbose=True):
         '''
         View a plot of your strategy's performance after the simulation is done.
 
@@ -635,12 +651,18 @@ class HistoricalSimulator():
         `return_plot` is a boolean that returns the matplotlib figure the plot
         is drawn on if there are other modifications you'd like to make to it.
         It is False by default.
+
+        `verbose` is a boolean that controls whether final portfolio results and
+        holdings are printed out.
         '''
+        my_pr = lambda *args, **kwargs: (print(*args, **kwargs)
+                                         if verbose else None)
+
         # plot the main strategy's results
         core_pct = self.core_frac * 1e2
         sat_pct = self.sat_frac * 1e2
         lw = 2.5 if len(self.active_dates) < 1000 else 2
-        ax = self.strategy_results.plot(x='date', y='value',
+        ax = self.strategy_results.plot('date', 'value',
                                         label=(f"{core_pct:.0f}% core, "
                                                f"{sat_pct:.0f}% sat"),
                                         figsize=(10,10), fontsize=14,
@@ -649,14 +671,14 @@ class HistoricalSimulator():
 
         # print info on main final portfolio holdings and overall values
         final = len(self.all_dates) - 1 # the last index of the value array
-        print('end date main portfolio value: '
+        my_pr('end date main portfolio value: '
               f"${self.portfolio_value(final):,.02f}")
 
-        print('end date main portfolio holdings: ')
+        my_pr('end date main portfolio holdings: ')
         strategy_assets = {key:info for key, info in self.assets.items()
                            if info['label'] != 'benchmark'}
         for i, (key, info) in enumerate(strategy_assets.items()):
-            print(f"{key}: {info['shares']}",
+            my_pr(f"{key}: {info['shares']}",
                   end=(', ' if i != len(strategy_assets) - 1 else '\n\n'))
 
         # plot the benchmark strategy's results and print info, if requested
@@ -665,19 +687,21 @@ class HistoricalSimulator():
                                     lw=lw, c='#82b6a5', ax=ax)
             # https://www.color-hex.com/color/b7e4cf, darker shade
 
-            print('end date benchmark portfolio value: '
+            my_pr('end date benchmark portfolio value: '
                   f"${self.portfolio_value(final, main_portfolio=False):,.02f}")
 
-            print('end date benchmark portfolio holdings: ')
+            my_pr('end date benchmark portfolio holdings: ')
             bench_assets = {key:info for key, info in self.assets.items()
                             if info['label'] == 'benchmark'}
             for i, (key, info) in enumerate(bench_assets.items()):
-                print(f"{key}: {info['shares']}",
+                my_pr(f"{key}: {info['shares']}",
                       end=(', ' if i != len(bench_assets) - 1 else '\n\n'))
+
+        # plot a line showing the starting amount of cash
+        ax.axhline(self._starting_cash, linestyle='--', c='k', alpha=.5)
 
         # modify some plot settings
         ax.legend(fontsize=14)
-        plt.axhline(self._starting_cash, linestyle='--', c='k', alpha=.5)
         ax.grid()
 
         # add dollar signs and comma separators to y ticks
@@ -690,6 +714,108 @@ class HistoricalSimulator():
 
         # return the figure, if requested
         if return_plot:
-            return ax.figure
+            plt.close()
+            return ax
+
+        plt.show()
+
+    def plot_assets(self, tickers, start_value=None, reinvest_dividends=False,
+                    logy=False, return_plot=False, verbose=True):
+        '''
+        View a plot of assets' individual performances over the course of the
+        simulation.
+
+        `tickers` is a list with at least one of the tickers included in
+        `self.assets`.
+
+        `start_value` is a float representing the amount of money invested in
+        each asset on day 1. Its default value is the original value chosen
+        for `self.cash` when this class instance was initialized.
+
+        `reinvest_dividends` is a boolean that, if True, reinvests any dividend
+        income back into the asset that paid it out. Coming soon?
+
+        `logy` is a boolean that controls whether the y-axis (account value in
+        dollars) is on a logarithmic (True) or linear (False, default) scale.
+
+        `return_plot` is a boolean that returns the matplotlib figure the plot
+        is drawn on if there are other modifications you'd like to make to it.
+        It is False by default.
+
+        `verbose` is a boolean that controls whether final portfolio results and
+        holdings are printed out.
+        '''
+        # confirm that arguments are acceptable
+        my_pr = lambda *args, **kwargs: (print(*args, **kwargs)
+                                         if verbose else None)
+        if not isinstance(tickers, list):
+            raise ValueError('make sure that `tickers` is a list.')
+        for tk in tickers:
+            if tk not in self.assets.keys():
+                raise ValueError(f"{tk} is not part of your list of assets.")
+        if start_value is None:
+            start_value = self._starting_cash
+        if reinvest_dividends:
+            raise NotImplementedError('Coming soon...')
+
+        # make separate colormaps for each ticker label
+        core_cmap = plt.cm.viridis.colors[250:150:-1]
+        core_cmap = core_cmap[::len(core_cmap) // len(self.core_names)]
+
+        sat_cmap = plt.cm.plasma.colors[225:125:-1]
+        sat_cmap = sat_cmap[::len(sat_cmap) // len(self.sat_names)]
+
+        bench_cmap = plt.cm.twilight.colors[200:100:-1]
+        bench_cmap = bench_cmap[::len(bench_cmap) // len(self.bench_names)]
+
+        # make the plot, asset by asset
+        fig, ax = plt.subplots(figsize=(10, 10))
+        lw = 1.5#2.5 if len(self.active_dates) < 1000 else 2
+        for i, tk in enumerate(tickers):
+            # adjust ticker's historical prices so first day is at start_value
+            tick_info = self.assets[tk]['df'].loc[:, ['date','adjClose']].copy()
+            tick_info.loc[:, 'adjClose'] /= tick_info.loc[0, 'adjClose']
+            tick_info.loc[:, 'adjClose'] *= start_value
+
+            # find out what type of asset this ticker is and assign color
+            tick_type = self.assets[tk]['label']
+            if tick_type == 'core':
+                col = core_cmap.pop()
+            elif tick_type == 'satellite':
+                col = sat_cmap.pop()
+            elif tick_type == 'benchmark':
+                col = bench_cmap.pop()
+            else:
+                raise ValueError(f"invalid 'label' for ticker {tk}")
+
+            # add this ticker's data to the plot
+            tick_info.plot('date', 'adjClose',
+                                label=f"{tk} ({tick_type})",
+                                lw=lw, c=col,
+                                fontsize=14, logy=logy, ax=ax)
+
+            # print final value of ticker holdings
+            my_pr(f"{tk} ending value: "
+                  f"${tick_info.iloc[-1]['adjClose']:,.2f}")
+
+        # plot a line showing the starting investment value
+        ax.axhline(start_value, linestyle='--', c='k', alpha=.5)
+
+        # modify some plot settings
+        ax.legend(fontsize=14)
+        ax.grid()
+
+        # add dollar signs and comma separators to y ticks
+        # (adapted from https://stackoverflow.com/a/25973637 and
+        #  https://stackoverflow.com/a/10742904)
+        ax.get_yaxis().set_major_formatter(
+            mpl.ticker.FuncFormatter(lambda x, _: f"${x:,.0f}"))
+        ax.get_yaxis().set_minor_formatter(
+            mpl.ticker.FuncFormatter(lambda x, _: f"${x:,.0f}"))
+
+        # return the figure, if requested
+        if return_plot:
+            plt.close()
+            return ax
 
         plt.show()

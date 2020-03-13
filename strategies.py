@@ -113,7 +113,8 @@ class SMAStrategy(HistoricalSimulator):
 
         return smas
 
-    def rebalance_satellite(self, ind_all, ind_active, curr_rb_ind):
+    def rebalance_satellite(self, ind_all, ind_active, curr_rb_ind,
+                            verbose=False):
         '''
         FOR SIMPLE MOVING AVERAGE CASE ONLY, satellite rebalance procedure
         (after start date, move in/out of market depending on SPY price/SMA)
@@ -125,6 +126,9 @@ class SMAStrategy(HistoricalSimulator):
         where to go is made in-method, but the (re-weighted) number of shares is
         returned for later use.
         '''
+        my_pr = lambda *args, **kwargs: (print(*args, **kwargs)
+                                         if verbose else None)
+
         # (purchases will be made using TODAY's PRICES, NOT yesterday's closes)
         in_mkt_tick = self.sat_names[0]
         in_mkt_pr = self.assets[in_mkt_tick]['df']['adjOpen'][ind_all]
@@ -136,7 +140,7 @@ class SMAStrategy(HistoricalSimulator):
 
         total_mkt_val = self.portfolio_value(ind_all, rebalance=True)
 
-        print(f"it's a satellite; sat_only is {self.sat_only[curr_rb_ind]}; "
+        my_pr(f"it's a satellite; sat_only is {self.sat_only[curr_rb_ind]}; "
               f"${self.cash:.2f} in account")
         # with enough consecutive days above SMA (and a buffer, if necessary)...
         if self.can_enter:
@@ -147,19 +151,19 @@ class SMAStrategy(HistoricalSimulator):
                 out_mkt_cash = out_mkt_sh * out_mkt_pr
 
                 if self.sat_only[curr_rb_ind]: # use all available $$ to buy in
-                    print('1: liq out, buy in')
+                    my_pr('1: liq out, buy in')
                     in_mkt_delta = int((self.cash + out_mkt_cash) // in_mkt_pr)
                 else: # if total rebalance, re-weight and return shares to buy
-                    print('2: liq out, balance in')
+                    my_pr('2: liq out, balance in')
                     in_mkt_delta = (total_mkt_val * self.sat_frac) // in_mkt_pr
                     return [in_mkt_delta, out_mkt_delta]
             # if already invested in in-market asset...
             else:
                 if self.sat_only[curr_rb_ind]: # already in, so nothing to buy
-                    print('3: already in, remain in')
+                    my_pr('3: already in, remain in')
                     in_mkt_delta = out_mkt_delta = 0
                 else: # if total rebalance, find and return net share change
-                    print('4: already in, balance in')
+                    my_pr('4: already in, balance in')
                     out_mkt_delta = 0
                     in_hold_val = in_mkt_sh * in_mkt_pr
                     in_mkt_delta = (total_mkt_val * self.sat_frac
@@ -174,19 +178,19 @@ class SMAStrategy(HistoricalSimulator):
                 in_mkt_cash = in_mkt_sh * in_mkt_pr
 
                 if self.sat_only[curr_rb_ind]: # use all available $$ to retreat
-                    print('5: liq in, buy out')
+                    my_pr('5: liq in, buy out')
                     out_mkt_delta = int((self.cash + in_mkt_cash) // out_mkt_pr)
                 else: # if total rebalance, find and return net share change
-                    print('6: liq in, balance out')
+                    my_pr('6: liq in, balance out')
                     out_mkt_delta = (total_mkt_val*self.sat_frac) // out_mkt_pr
                     return [in_mkt_delta, out_mkt_delta]
             # if already invested in out-market asset...
             else:
                 if self.sat_only[curr_rb_ind]: # already out, so nothing to buy
-                    print('7: already out, remain out')
+                    my_pr('7: already out, remain out')
                     in_mkt_delta = out_mkt_delta = 0
                 else: # if total rebalance, find and return net share change
-                    print('8: already out, balance out')
+                    my_pr('8: already out, balance out')
                     in_mkt_delta = 0
                     out_hold_val = out_mkt_sh * out_mkt_pr
                     out_mkt_delta = (total_mkt_val * self.sat_frac
@@ -196,7 +200,7 @@ class SMAStrategy(HistoricalSimulator):
         # if this is a satellite-only rebalance, complete the trades
         names = np.array(self.sat_names)
         deltas = np.array([in_mkt_delta, out_mkt_delta]).astype(int)
-        self._make_rb_trades(names, deltas, ind_all)
+        self._make_rb_trades(names, deltas, ind_all, verbose=verbose)
 
 class VolTargetStrategy(HistoricalSimulator):
     def __init__(self, Portfolio, burn_in=30, vol_target=.15, **kwargs):
@@ -288,7 +292,8 @@ class VolTargetStrategy(HistoricalSimulator):
 
         return corrs
 
-    def rebalance_satellite(self, ind_all, ind_active, curr_rb_ind):
+    def rebalance_satellite(self, ind_all, ind_active, curr_rb_ind,
+                            verbose=False):
         '''
         FOR VOLATILITY TARGETING CASE ONLY, satellite rebalance procedure
         [OJO! volatility == standard deviation (or sigma) == sqrt(variance)]
@@ -299,8 +304,10 @@ class VolTargetStrategy(HistoricalSimulator):
         portfolio is rebalanced, it returns the appropriate number of shares
         to buy/sell for all satellite assets.
         '''
+        my_pr = lambda *args, **kwargs: (print(*args, **kwargs)
+                                         if verbose else None)
 
-        print(f"it's a satellite; sat_only is {self.sat_only[curr_rb_ind]}; "
+        my_pr(f"it's a satellite; sat_only is {self.sat_only[curr_rb_ind]}; "
               f"${self.cash:.2f} in account")
         # What are my current satellite holdings worth?
         # (purchases will be made using TODAY's PRICES, NOT yesterday's closes)
@@ -348,9 +355,9 @@ class VolTargetStrategy(HistoricalSimulator):
         new_pct_in = fracs[np.argmin(np.abs(vol_tests - self.vol_target))]
         new_pct_out = 1 - new_pct_in
 
-        print([k.tolist()
+        my_pr([k.tolist()
                for k in np.round(np.stack((fracs, vol_tests), axis=1), 2)])
-        print(f"vol target is {self.vol_target:.2f}. frac in: {new_pct_in:.2f}")
+        my_pr(f"vol target is {self.vol_target:.2f}. frac in: {new_pct_in:.2f}")
 
         # Find the resulting net change in shares held
         in_delta = (can_spend * new_pct_in - in_mkt_val) // in_mkt_pr
@@ -363,4 +370,4 @@ class VolTargetStrategy(HistoricalSimulator):
         else: # If this is a satellite-only rebalance, make the trades
             names = np.array(self.sat_names)
             deltas = np.array(deltas).astype(int)
-            self._make_rb_trades(names, deltas, ind_all)
+            self._make_rb_trades(names, deltas, ind_all, verbose=verbose)
