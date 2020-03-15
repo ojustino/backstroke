@@ -199,7 +199,8 @@ class PortfolioMaker:
         Ensures the proposed `relative_core_frac` value is a boolean.
         '''
         if not isinstance(rel_core_frac, bool):
-            raise TypeError('`relative_core_frac` must be a boolean.') # assert (), ()
+            raise TypeError('`relative_core_frac` must be a boolean.')
+
         return rel_core_frac
 
     def _validate_ticker(self, ticker):
@@ -209,8 +210,8 @@ class PortfolioMaker:
         already exists in `assets`.
         '''
         if ticker not in self._valid_tix['ticker'].values:
-            raise ValueError('`ticker` value is absent from the Tiingo list '
-                             'of supported assets. Try another?')
+            raise ValueError('{ticker} is absent from the Tiingo list of '
+                             'supported assets. Try another?')
 
         if ticker in self.assets.keys():
             raise ValueError('`ticker` value is already a key in `assets`. '
@@ -398,7 +399,7 @@ class PortfolioMaker:
                                  'have in_mkt=True.')
             if self.sat_frac == 0:
                 warnings.warn('Two satellite assets have been chosen, but '
-                              f"`sat_frac` is 0% Is that intentional?")
+                              f"`sat_frac` is 0%. Is that intentional?")
 
         print('-----passed-----')
         print('----------------')

@@ -15,13 +15,15 @@ class HistoricalSimulator():
     # AbstractBaseClass? in order to impose that children
     # should have certain methods that are not defined here
     '''
-    `Portfolio`, `start_date`, `end_date`, `sat_rb_freq`, `tot_rb_freq`, `cash`
+    `Portfolio`, `start_date`, `end_date`, `sat_rb_freq`, `tot_rb_freq`,
+    `reinvest_dividends`, and `cash`
     '''
     # earliest start dates: 1998-11-22, 2007-05-22, 2012-10-21
     def __init__(self, Portfolio,
                  start_date=datetime(1998, 11, 22),
                  end_date=datetime(1998, 11, 22) + timedelta(days=365.25*8),
-                 sat_rb_freq=6, tot_rb_freq=1, cash=1e4):
+                 sat_rb_freq=6, tot_rb_freq=1, reinvest_dividends=False,
+                 cash=1e4):
         # make sure a PortfolioMaker object is present
         if not isinstance(Portfolio, PortfolioMaker):
             raise ValueError('The first argument of HistoricalSimulator() must '
@@ -29,15 +31,15 @@ class HistoricalSimulator():
 
         # how often a year should we rebalance the satellite portion?
         # and, how often a year should we rebalance the whole portfolio?
-        if sat_rb_freq < tot_rb_freq:
-            raise ValueError('satellite rebalance frequency must be greater '
-                             'than or equal to total rebalance frequency')
         if (  ((12 % sat_rb_freq != 0 or sat_rb_freq % 1 != 0)
                and sat_rb_freq != 365.25)
             or (12 % tot_rb_freq != 0 or tot_rb_freq % 1 != 0)  ):
             raise ValueError('Allowed rebalance frequencies are 1, 2, 3, 4, '
                              '6, 8, and 12 times a year. `sat_rb_freq` can '
                              'also be 365.25 for daily rebalances.')
+        if sat_rb_freq < tot_rb_freq:
+            raise ValueError('satellite rebalance frequency must be greater '
+                             'than or equal to total rebalance frequency')
         self.sat_rb_freq = sat_rb_freq
         self.tot_rb_freq = tot_rb_freq
 
@@ -51,25 +53,29 @@ class HistoricalSimulator():
         self.start_date = start_date
         self.end_date = end_date
 
-        # save the core and satellite fractions
-        self.core_frac = np.round(Portfolio._get_label_weights('core').sum(),6)
-        self.sat_frac = np.round(1 - self.core_frac, 6)
+        # validate proposed asset dictionary, then add historical data to it
+        self.assets = self._validate_assets_dict(Portfolio)
+
+        # make arrays of all dates in set and all *active* dates (sans burn-in)
+        self.all_dates, self.active_dates = self._get_date_arrays()
+
+        # at which indices in the ticker DataFrames will rebalances occur?
+        # and, are they for the satellite only or the whole portfolio?
+        self.rb_indices, self.sat_only = self._calc_rebalance_info()
+
+        # save preference for handling dividend payouts
+        self.reinvest_dividends = reinvest_dividends
 
         # track remaining money in main and benchmark portfolios
         # (are properties, so an error is thrown if they go negative)
+        # (go Decimal here?)
         self._cash = float(cash)
         self._bench_cash = self._cash
         self._starting_cash = self._cash
 
-        # validate proposed asset dictionary, then add historical data to it
-        self.assets = self._validate_assets_dict(Portfolio)
-
-        # make arrays of all dates in set and all *active* dates (w/o burn-in)
-        self.all_dates, self.active_dates = self._get_date_arrays()
-
-        # at which indices in the ticker DataFrames will rebalances occur?
-        # and, are those are they for the satellite only or the whole portfolio?
-        self.rb_indices, self.sat_only = self._calc_rebalance_info()
+        # save the core and satellite fractions
+        self.core_frac = np.round(Portfolio._get_label_weights('core').sum(),6)
+        self.sat_frac = np.round(1 - self.core_frac, 6)
 
         # make DataFrames to track main and benchmark portfolio values over time
         self.strategy_results = pd.DataFrame({
@@ -134,7 +140,7 @@ class HistoricalSimulator():
         including cash.
 
         `ind_all` is the integer index of each ticker's historical DataFrame
-        from which to get the price data.
+        from which to get the price data. It aligns with self.all_dates.
 
         If `main_portfolio` == True (default), the method returns the value of
         main strategy's core/satellite portfolio. If `main_portfolio` == False,
@@ -212,7 +218,7 @@ class HistoricalSimulator():
                 raise ValueError(f"{tk}'s start date of {dt_str} is later "
                                  f"than your chosen start date of {sd_str}. "
                                  'Try an earlier start date or choose a '
-                                 ' different ticker.')
+                                 'different ticker.')
 
         # are all assets still active by self.end_date?
         for i, dt in enumerate(tick_info['endDate']):
@@ -238,6 +244,38 @@ class HistoricalSimulator():
         respective values are the returned DataFrame and the number of 'ticker'
         shares currently held (0 to start).
         '''
+        # add a standard benchmark portfolio if one wasn't provided
+        if len([tk for tk, info in Portfolio.assets.items()
+                if info['label'] == 'benchmark']) == 0:
+            # ensure that the potential additions exist during the simulation
+            # period and are not already listed as core/satellite assets
+            # (a future structural change might allow multiply-labeled assets)
+            bench_stock = bench_bond = None
+
+            # the stock index will be an ETF/mutual fund tracking the S&P 500
+            if (  self.open_date >= datetime(1993, 1, 29)
+                  and 'SPY' not in Portfolio.assets.keys()  ):
+                bench_stock = 'SPY'
+            elif (  self.open_date >= datetime(1976, 8, 31)
+                    and 'VFINX' not in Portfolio.assets.keys()  ):
+                bench_stock = 'VFINX'
+
+            # the bond index will be an ETF/mutual fund tracking the
+            # Barclays US Aggregate Bonds Index
+            if (  self.open_date >= datetime(2003, 12, 31)
+                  and 'AGG' not in Portfolio.assets.keys()  ):
+                bench_bond = 'AGG'
+            elif (  self.open_date >= datetime(1986, 12, 31)
+                    and 'VBMFX' not in Portfolio.assets.keys()  ):
+                bench_bond = 'VBMFX'
+
+            # if valid stock & bond tickers were found, add the portfolio
+            # (following the popular 60% stock/40% bond allocation model)
+            if bench_stock is not None and bench_bond is not None:
+                Portfolio.add_ticker(bench_stock, .6, label='benchmark')
+                Portfolio.add_ticker(bench_bond, .4, label='benchmark')
+            # else, the benchmark portfolio remains empty
+
         # run Portfolio's own validation function to be thorough
         Portfolio.check_assets()
 
@@ -256,6 +294,7 @@ class HistoricalSimulator():
             info['df'] =  df
 
             # initialize this asset with zero shares
+            # (go Decimal here?)
             info['shares'] = 0
 
         # ensure that each asset has the same number of dates
@@ -422,7 +461,7 @@ class HistoricalSimulator():
         portfolio percentage does not change -- core or benchmark.
 
         `ind_all` is the integer index of each ticker's historical DataFrame
-        from which to get the price data.
+        from which to get the price data. It aligns with self.all_dates.
 
         `names` is a list of assets who share the same label; it should
         typically either be `self.core_names` or `self.bench_names`.
@@ -467,20 +506,27 @@ class HistoricalSimulator():
         assets in `names`.
 
         `ind_all` is the integer index of each ticker's historical DataFrame
-        from which to get the price data.
+        from which to get the price data. It aligns with self.all_dates.
 
         `main_portfolio` decides whether to find changes for the main
         strategy's core/satellite portfolio (True) or the benchmark portfolio
         (False).
+
+        `verbose` is a boolean that controls whether or not to print
+        information on completed trades.
         '''
         my_pr = lambda *args, **kwargs: (print(*args, **kwargs)
                                          if verbose else None)
 
-        # once we have deltas for all assets, find which require sells/buys
+        # exit if list of names is empty (sometimes the case for benchmark)
+        if len(names) == 0:
+            return
+
+        # use deltas to find which assets require sells, buys, or nothing
         to_sell = np.where(deltas < 0)[0]
         to_buy = np.where(deltas > 0)[0] # no action needed when deltas == 0
 
-        # gather all prices in an array that corresponds with deltas
+        # gather assets' current prices in an array that matches with deltas
         prices = np.array([self.assets[nm]['df']['adjOpen'][ind_all]
                            for nm in names])
 
@@ -490,8 +536,8 @@ class HistoricalSimulator():
             if main_portfolio:
                 self.cash -= prices[to_sell[i]] * share_change # ...increases $$
                 # only print transaction info for main portfolio
-                my_pr(f"sold {abs(share_change):.0f} shares of {nm} "
-                      f"@${prices[to_sell[i]]:.2f} | ${self.cash:.2f} in account")
+                my_pr(f"sold {abs(share_change):.0f} shares of {nm} @$"
+                      f"{prices[to_sell[i]]:.2f} | ${self.cash:.2f} in account")
             else:
                 self.bench_cash -= prices[to_sell[i]] * share_change # ...$$ ^
             self.assets[nm]['shares'] += share_change # ...decreases shares
@@ -502,8 +548,8 @@ class HistoricalSimulator():
             if main_portfolio:
                 self.cash -= prices[to_buy[i]] * share_change
                 # only print transaction info for main portfolio
-                my_pr(f"bought {share_change:.0f} shares of {nm} "
-                      f"@${prices[to_buy[i]]:.2f} | ${self.cash:.2f} in account")
+                my_pr(f"bought {share_change:.0f} shares of {nm} @$"
+                      f"{prices[to_buy[i]]:.2f} | ${self.cash:.2f} in account")
             else:
                 self.bench_cash -= prices[to_buy[i]] * share_change
             self.assets[nm]['shares'] += share_change
@@ -538,7 +584,7 @@ class HistoricalSimulator():
         # get share changes for satellite assets from child's method
         deltas.extend(self.rebalance_satellite(ind_all, ind_active,
                                                curr_rb_ind, verbose=verbose))
-        deltas = np.array(deltas).astype(int)
+        deltas = np.array(deltas)
         my_pr('deltas:', deltas)
 
         # rebalance the main (core/satellite) strategy's portfolio
@@ -548,12 +594,74 @@ class HistoricalSimulator():
         # next, get share changes for benchmark assets (CHECK FOR EXISTENCE?)
         bench_deltas = self._get_static_rb_changes(self.bench_names, ind_all,
                                                    main_portfolio=False)
-        bench_deltas = np.array(bench_deltas).astype(int)
+        bench_deltas = np.array(bench_deltas)
 
         # rebalance the benchmark portfolio
         bench_names = np.array(self.bench_names)
         self._make_rb_trades(bench_names, bench_deltas, ind_all,
                              main_portfolio=False) # no printed output for now
+
+    def _check_dividends(self, ind_all, main_portfolio=True, verbose=False):
+        '''
+        Called in `self.begin_time_loop()`.
+
+        Checks whether assets currently held in a portfolio are paying out
+        dividends on a given day. If so, accepts the dividend as partial shares
+        of that asset if `self.reinvest_dividends` is True, or as cash if False.
+
+        Note that this check happens before any rebalancing transactions because
+        one needs to have owned an asset on the day before the dividend
+        (the "ex-date") in order to claim the payment.
+
+        `ind_all` is the integer index of each ticker's historical DataFrame
+        from which to get dividend data. It aligns with self.all_dates.
+
+        If `main_portfolio` == True (default), the method checks for dividends
+        from the assets in the  main strategy's core/satellite portfolio. If
+        `main_portfolio` == False, it checks assets in the benchmark portfolio.
+
+        `verbose` is a boolean that controls whether or not to print
+        information about dividends received.
+
+        TECHNICALLY, THE ASSET NEEDS TO HAVE BEEN BOUGHT 2 BUSINESS DAYS AGO, NOT 1...
+        MAKE THAT CHANGE? NOT SURE IF I WANT TO SAVE SHARE INFO OVER TIME
+        '''
+        my_pr = lambda *args, **kwargs: (print(*args, **kwargs)
+                                         if verbose else None)
+
+        # choose assets to check for dividends
+        tickers = (self.core_names + self.sat_names if main_portfolio
+                   else self.bench_names)
+
+        # check each asset for a dividend payment on the indicated day
+        for tk in tickers:
+            # if there's none, skip to the next ticker
+            div_cash = self.assets[tk]['df'].loc[ind_all, 'divCash']
+            if div_cash == 0:
+                continue
+
+            # if this ticker isn't currently in the portfolio, skip to the next
+            shares_held = self.assets[tk]['shares']
+            if shares_held == 0:
+                continue
+
+            # barring those, receive the dividend as partial shares or cash
+            if self.reinvest_dividends:
+                tk_price = self.assets[tk]['df'].loc[ind_all, 'adjOpen']
+                partials = shares_held * (div_cash / tk_price)
+                my_pr(f"**** on {self.today.strftime('%Y-%m-%d')}\n"
+                      f"received a ${div_cash:.2f} dividend from {tk} @$"
+                      f"{tk_price:.2f} | {partials:.4f} new shares in account")
+                self.assets[tk]['shares'] += partials
+            else:
+                add_cash = shares_held * div_cash
+                if main_portfolio:
+                    self.cash += add_cash
+                    my_pr(f"**** on {self.today.strftime('%Y-%m-%d')}\n"
+                          f"received a ${div_cash:.2f} dividend from {tk}'s "
+                          f"{shares_held} shares | ${self.cash:.2f} in account")
+                else:
+                    self.bench_cash += add_cash
 
     def begin_time_loop(self, verbose=False):
         '''
@@ -585,6 +693,12 @@ class HistoricalSimulator():
             # "PRE-OPEN": update daily indicators based on YESTERDAY's CLOSES
             if i >= self.burn_in:
                 self.on_new_day(i, i - self.burn_in)
+
+            # "PRE-OPEN": cash in dividends from ex-date (YESTERDAY's) holdings,
+            # once for main portfolio and once for benchmark
+            if i >= self.burn_in:
+                self._check_dividends(i, verbose=verbose)
+                self._check_dividends(i, main_portfolio=False, verbose=False)
 
             # AT OPEN: rebalance if needed
             if i == self.rb_indices[curr_rb_ind]:
@@ -676,11 +790,14 @@ class HistoricalSimulator():
               f"${self.portfolio_value(final):,.02f}")
 
         my_pr('end date main portfolio holdings: ')
-        strategy_assets = {key:info for key, info in self.assets.items()
-                           if info['label'] != 'benchmark'}
-        for i, (key, info) in enumerate(strategy_assets.items()):
-            my_pr(f"{key}: {info['shares']}",
-                  end=(', ' if i != len(strategy_assets) - 1 else '\n\n'))
+        strategy_assets = ([f"{key}: {info['shares']:.1f}"
+                            for key, info in self.assets.items()
+                            if info['label'] != 'benchmark'])
+        my_pr(', '.join(strategy_assets), end='\n\n')
+
+        # check if a benchmark exists; skip the benchmark plot if it doesn't
+        if len(self.bench_names) == 0:
+            show_benchmark = False
 
         # plot the benchmark strategy's results and print info, if requested
         if show_benchmark:
@@ -692,11 +809,10 @@ class HistoricalSimulator():
                   f"${self.portfolio_value(final, main_portfolio=False):,.02f}")
 
             my_pr('end date benchmark portfolio holdings: ')
-            bench_assets = {key:info for key, info in self.assets.items()
-                            if info['label'] == 'benchmark'}
-            for i, (key, info) in enumerate(bench_assets.items()):
-                my_pr(f"{key}: {info['shares']}",
-                      end=(', ' if i != len(bench_assets) - 1 else '\n\n'))
+            bench_assets = ([f"{key}: {info['shares']:.1f}"
+                            for key, info in self.assets.items()
+                            if info['label'] == 'benchmark'])
+            my_pr(', '.join(bench_assets))
 
         # plot a line showing the starting amount of cash
         ax.axhline(self._starting_cash, linestyle='--', c='k', alpha=.5)
@@ -760,14 +876,15 @@ class HistoricalSimulator():
             raise NotImplementedError('Coming soon...')
 
         # make separate colormaps for each ticker label
-        core_cmap = plt.cm.viridis.colors[250:150:-1]
-        core_cmap = core_cmap[::len(core_cmap) // len(self.core_names)]
-
-        sat_cmap = plt.cm.plasma.colors[225:125:-1]
-        sat_cmap = sat_cmap[::len(sat_cmap) // len(self.sat_names)]
-
-        bench_cmap = plt.cm.twilight.colors[200:100:-1]
-        bench_cmap = bench_cmap[::len(bench_cmap) // len(self.bench_names)]
+        if len(self.core_names) != 0:
+            core_cmap = plt.cm.viridis.colors[250:150:-1]
+            core_cmap = core_cmap[::len(core_cmap) // len(self.core_names)]
+        if len(self.sat_names) != 0:
+            sat_cmap = plt.cm.plasma.colors[225:125:-1]
+            sat_cmap = sat_cmap[::len(sat_cmap) // len(self.sat_names)]
+        if len(self.bench_names) != 0:
+            bench_cmap = plt.cm.twilight.colors[200:100:-1]
+            bench_cmap = bench_cmap[::len(bench_cmap) // len(self.bench_names)]
 
         # make the plot, asset by asset
         fig, ax = plt.subplots(figsize=(10, 10))

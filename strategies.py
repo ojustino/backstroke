@@ -129,6 +129,13 @@ class SMAStrategy(HistoricalSimulator):
         '''
         my_pr = lambda *args, **kwargs: (print(*args, **kwargs)
                                          if verbose else None)
+        my_pr(f"it's a satellite; sat_only is {self.sat_only[curr_rb_ind]}; "
+              f"${self.cash:.2f} in account")
+
+        # exit if there are no satellite assets
+        if len(self.sat_names) == 0:
+            # empty list needed when called from self.rebalance_portfolio()
+            return []
 
         # (purchases will be made using TODAY's PRICES, NOT yesterday's closes)
         in_mkt_tick = self.sat_names[0]
@@ -141,8 +148,6 @@ class SMAStrategy(HistoricalSimulator):
 
         total_mkt_val = self.portfolio_value(ind_all, rebalance=True)
 
-        my_pr(f"it's a satellite; sat_only is {self.sat_only[curr_rb_ind]}; "
-              f"${self.cash:.2f} in account")
         # with enough consecutive days above SMA (and a buffer, if necessary)...
         if self.can_enter:
             # switch to in-market asset if not already there
@@ -200,7 +205,7 @@ class SMAStrategy(HistoricalSimulator):
 
         # if this is a satellite-only rebalance, complete the trades
         names = np.array(self.sat_names)
-        deltas = np.array([in_mkt_delta, out_mkt_delta]).astype(int)
+        deltas = np.array([in_mkt_delta, out_mkt_delta])
         self._make_rb_trades(names, deltas, ind_all, verbose=verbose)
 
 class VolTargetStrategy(HistoricalSimulator):
@@ -307,19 +312,24 @@ class VolTargetStrategy(HistoricalSimulator):
         '''
         my_pr = lambda *args, **kwargs: (print(*args, **kwargs)
                                          if verbose else None)
-
         my_pr(f"it's a satellite; sat_only is {self.sat_only[curr_rb_ind]}; "
               f"${self.cash:.2f} in account")
+
+        # exit if there are no satellite assets
+        if len(self.sat_names) == 0:
+            # empty list needed when called from self.rebalance_portfolio()
+            return []
+
         # What are my current satellite holdings worth?
         # (purchases will be made using TODAY's PRICES, NOT yesterday's closes)
         in_mkt_tick = self.sat_names[0]
         in_mkt_pr = self.assets[in_mkt_tick]['df']['adjOpen'][ind_all]
-        in_mkt_sh = self.assets[in_mkt_tick]['shares']
+        in_mkt_sh = int(self.assets[in_mkt_tick]['shares'])
         in_mkt_val = in_mkt_pr * in_mkt_sh
 
         out_mkt_tick = self.sat_names[-1]
         out_mkt_pr = self.assets[out_mkt_tick]['df']['adjOpen'][ind_all]
-        out_mkt_sh = self.assets[out_mkt_tick]['shares']
+        out_mkt_sh = int(self.assets[out_mkt_tick]['shares'])
         out_mkt_val = out_mkt_pr * out_mkt_sh
 
         # What can i spend during this rebalance?
@@ -353,22 +363,49 @@ class VolTargetStrategy(HistoricalSimulator):
 
         # Isolate the weighting that comes closet to our target volatility
         # (ties will go to the combination with a higher in_mkt fraction)
-        new_pct_in = fracs[np.argmin(np.abs(vol_tests - self.vol_target))]
-        new_pct_out = 1 - new_pct_in
+        new_frac_in = fracs[np.argmin(np.abs(vol_tests - self.vol_target))]
+        new_frac_out = 1 - new_frac_in
 
-        my_pr([k.tolist()
-               for k in np.round(np.stack((fracs, vol_tests), axis=1), 2)])
-        my_pr(f"vol target is {self.vol_target:.2f}. frac in: {new_pct_in:.2f}")
+        my_pr({f"{k[0]*1e2:.0f}%": k[1]
+               for k in np.round(np.stack((fracs, vol_tests), axis=1), 2)})
+        my_pr(f"vol target is {self.vol_target:.2f}. frac in: {new_frac_in:.2f}")
+        my_pr(f"current shares: {self.assets[in_mkt_tick]['shares']} in, {self.assets[out_mkt_tick]['shares']} out")
+
+        # Find the resulting net change in shares held for both assets
+        # (This strategy is vulnerable to the odd floating point "error" that
+        #  uses all available cash plus $0.000000001 and throws an error. Using
+        #  decimal.Decimal on self.cash/bench_cash, all entries in
+        #  self.assets[tk]['shares'], and can_spend & in/out_mkt_pr here can
+        #  prevent that, but it's slower than using floats...)
+        # (Also, for non-mutual funds, when reinvest_dividends=True, need to
+        #  disallow all partial share purchases. Need to do the same for sales,
+        #  **except** when all shares are being sold.)
+        max_in_sh = int(can_spend / in_mkt_pr)
+        poss_in_sh = np.linspace(0, max_in_sh, max_in_sh + 1)
+        poss_in_fracs = (in_mkt_pr * poss_in_sh) / can_spend
+
+        in_mkt_ideal = np.argmin(np.abs(poss_in_fracs - new_frac_in))
+        if in_mkt_ideal == 0 and self.reinvest_dividends == True:
+            # also sell partial shares
+            in_mkt_sh = self.assets[in_mkt_tick]['shares']
+            print('in_mkt partial shares (if any) will be sold!')
+        in_mkt_delta = in_mkt_ideal - in_mkt_sh
+
+        out_mkt_ideal = int((can_spend - in_mkt_pr * in_mkt_ideal) / out_mkt_pr)
+        if out_mkt_ideal == 0 and self.reinvest_dividends == True:
+            # also sell partial shares
+            out_mkt_sh = self.assets[out_mkt_tick]['shares']
+            print('out_mkt partial shares (if any) will be sold!')
+        out_mkt_delta = out_mkt_ideal - out_mkt_sh
 
         # Find the resulting net change in shares held
-        in_delta = (can_spend * new_pct_in - in_mkt_val) // in_mkt_pr
-        out_delta = (can_spend * new_pct_out - out_mkt_val) // out_mkt_pr
-        deltas = [in_delta, out_delta]
+        my_pr(f"out_mkt_delta: {out_mkt_delta}, out_mkt_val: {out_mkt_val}, out_mkt_pr: {out_mkt_pr}")
+        deltas = [in_mkt_delta, out_mkt_delta]
 
         # Return share change values if this is an entire-portfolio rebalance
         if not self.sat_only[curr_rb_ind]:
             return deltas
         else: # If this is a satellite-only rebalance, make the trades
             names = np.array(self.sat_names)
-            deltas = np.array(deltas).astype(int)
+            deltas = np.array(deltas)
             self._make_rb_trades(names, deltas, ind_all, verbose=verbose)
