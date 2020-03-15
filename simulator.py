@@ -1,4 +1,5 @@
 #!/usr/bin/python3
+from better_abc import ABC, abstract_attribute, abstractmethod
 from datetime import datetime, timedelta
 from portfolio_maker import PortfolioMaker
 import matplotlib as mpl
@@ -11,9 +12,7 @@ import time
 
 MY_API_KEY = '901a2a03f9d57935c22df22ae5a5377cb8de6f22'
 
-class HistoricalSimulator():
-    # AbstractBaseClass? in order to impose that children
-    # should have certain methods that are not defined here
+class HistoricalSimulator(ABC):
     '''
     `Portfolio`, `start_date`, `end_date`, `sat_rb_freq`, `tot_rb_freq`,
     `reinvest_dividends`, and `cash`
@@ -133,6 +132,65 @@ class HistoricalSimulator():
                              'in benchmark portfolio.')
         self._bench_cash = value
 
+    # define attribute and methods that must be present in children `Strategy`s
+    # **(make sure to use the listed arguments)**
+    @abstract_attribute
+    def burn_in(self):
+        '''
+        An attribute (not method) representing the number of days of data
+        needed before a Strategy class can begin trading. For example, a
+        strategy based on a 200-day simple moving average of some asset's price
+        needs `burn_in=200`.
+        '''
+        pass
+
+    @abstractmethod
+    def on_new_day(self, ind_all, ind_active):
+        '''
+        Called in self.begin_time_loop().
+
+        Keeps daily track of whatever indicators are needed to carry out a
+        Strategy. See SMAStrategy() for an example, though this method can also
+        just be a simple `pass` statement (as in VolTargetStrategy()) if
+        there's nothing that must be tracked daily.
+
+        `ind_all` is the integer index of each ticker's historical DataFrame
+        from which to get the price data. It aligns with self.all_dates.
+
+        `ind_active` is the integer index of self.active_dates that matches the
+        simulation's current date. `ind_all` = `ind_active` + self.burn_in.
+        '''
+        pass
+
+    @abstractmethod
+    def rebalance_satellite(self, ind_all, ind_active, curr_rb_ind,
+                            verbose=False):
+        '''
+        Called in self.rebalance_portfolio().
+
+        A satellite-only version of self._get_static_rb_changes() that
+        re-weights the main portfolio's satellite assets according to an
+        individual Strategy's logic. Either returns a list of share changes on
+        total rebalaces or turns that list into an array that's passed to
+        self._make_rb_trades() on satellite-only rebalances. In either
+        case, the in-market asset's change in shares should be the first entry.
+
+        `ind_all` is the integer index of each ticker's historical DataFrame
+        from which to get the price data. It aligns with self.all_dates.
+
+        `ind_active` is the integer index of self.active_dates that matches the
+        simulation's current date. `ind_all` = `ind_active` + self.burn_in.
+
+        `curr_rb_ind` is the integer index of self.rb_indices and self.sat_only.
+        self.sat_only[curr_rb_ind] is True on satellite-only rebalances and
+        False on total rebalances. self.rb_indices[curr_rb_ind] == `ind_all`.
+
+        `verbose` is a boolean that controls whether or not to print any
+        debugging information you choose to include in this method.
+        '''
+        pass
+
+    # define HistoricalSimulator's own methods
     def portfolio_value(self, ind_all=None,
                         main_portfolio=True, rebalance=False):
         '''
