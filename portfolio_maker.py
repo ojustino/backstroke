@@ -10,35 +10,37 @@ import warnings
 
 
 class PortfolioMaker:
+    # INCORPORATE traitlets to do the validation?
     '''
     Create a portfolio of assets to be fed into a simulation. The centerpiece of
     this class is the `assets` attribute, a dictionary containing the tickers
     to be used in the simulation and associated information them.
 
-    Portfolios follow the core/satellite model -- a more stable core portion
-    that rebalances its assets to their target weights, and a more volatile
-    satellite portion that balances between a riskier "in-market" asset and a
-    safer "out-of-market" asset depending on indicators from a *Strategy class.
+    Portfolios follow the core/satellite model -- a static core portion whose
+    assets are consistently rebalanced to the same target weights, and a more
+    dynamic satellite portion that can include a riskier "in-market" asset
+    and a safer "out-of-market" asset.
 
     `assets` can optionally keep track of a separate portfolio of one or more
     benchmark assets that follow the same rebalancing schedule as the core
     portion of the main portfolio. Benchmark assets can be used to help make
-    decisions in strategies or just to provide a baseline against which to
-    compare the main core/satellite portfolio.
+    decisions in Strategies or just to provide a baseline against which to
+    measure the main core/satellite portfolio's success.
 
     The `add_ticker()` method is the primary mechanism for adding information to
     the `assets` dictionary.
 
-    Argument `sat_frac` is float/int between 0 and 1 (inclusive) that dictates
-    what (decimal) fraction of the portfolio should be allocated to the
-    satellite portion, with the core taking up the other 1 - `sat_frac`
-    fraction.
+    Arguments
+    ---------
 
-    Argument `relative_core_frac` is a boolean that determines whether the
-    weights entered for core assets are entered as given (if False) or adjusted
-    relative to `sat_frac` (if True).
+    sat_frac : float, required
+        A number between 0 and 1 (inclusive) that dictates what (decimal)
+        fraction of the main portfolio should be allocated to the satellite
+        portion, with the core taking up the other 1 - `sat_frac` fraction.
 
-    INCORPORATE traitlets to do the validation?
+    relative_core_frac : boolean, optional
+        A convenience option that, when True, automatically adjusts individual
+        core assets' fractions when `sat_frac` is changed. [default: True]
     '''
     def __init__(self, sat_frac, relative_core_frac=True):
         # download ticker data
@@ -49,7 +51,7 @@ class PortfolioMaker:
         self.tick_info = pd.DataFrame()
         # will eventually contain rows of assets selected from valid_tix
 
-        # set __init__ arguments to properties so changes are tracked
+        # set __init__'s arguments as properties so changes are tracked
         self._sat_frac = self._validate_fraction(sat_frac)
         self._relative_core_frac = relative_core_frac
 
@@ -151,7 +153,7 @@ class PortfolioMaker:
 
         # to view specific tickers:
         # valid_tix[valid_tix['ticker'].isin(['SCHG', 'SCHM', 'EFG',
-        #                                         'BIV', 'LQD', 'ACES'])]
+        #                                    'BIV', 'LQD', 'ACES'])]
 
         return valid_tix
 
@@ -178,7 +180,7 @@ class PortfolioMaker:
                                  'satellite assets. Please remove an existing '
                                  'entry if you prefer to use this one.')
             self._validate_in_market(in_market)
-        elif label not in ['core', 'satellite', 'benchmark']: # look a using set?
+        elif label not in {'core', 'satellite', 'benchmark'}:
             raise ValueError("Valid `label` options are 'core', 'satellite', "
                              "and 'benchmark'.")
         return label
@@ -215,9 +217,8 @@ class PortfolioMaker:
 
         if ticker in self.assets.keys():
             raise ValueError('`ticker` value is already a key in `assets`. '
-                             'if you want to replace the entry, Please use '
-                             'remove_ticker() with the proposed `ticker` value '
-                             'first.')
+                             'To replace the entry, first use remove_ticker() '
+                             'on your proposed `ticker` value.')
 
         return ticker
 

@@ -14,15 +14,59 @@ MY_API_KEY = '901a2a03f9d57935c22df22ae5a5377cb8de6f22'
 
 class HistoricalSimulator(ABC):
     '''
-    `Portfolio`, `start_date`, `end_date`, `sat_rb_freq`, `tot_rb_freq`,
-    `reinvest_dividends`, and `cash`
+    The parent of a Strategy class that does the heavy lifting in simulating
+    how a portfolio composed of a PortfolioMaker instance's assets would have
+    performed over a specified period of time. Run `self.begin_time_loop()`
+    after initializing an instance to run a simulation; each instance is good
+    for one simulation only.
+
+    Handles downloading asset data from Tiingo, rebalancing (whole portfolio
+    and satellite-only through its child), dividends, and plotting of
+    post-simulation results. The simulation includes both the main core/
+    satellite portfolio and a standard benchmark portfolio.
+
+    Arguments
+    ---------
+
+    Portfolio : `portfolio_maker.PortfolioMaker`, required
+        A PortfolioMaker instance whose `assets` attribute contains your desired
+        assets, fractions, and categories. Its `check_assets()` method must pass
+        before you can run any simulations.
+
+    cash : float, optional
+        The amount of cash with which to begin investing. [default: $10,000]
+
+    start_date : `datetime.datetime`, optional
+        The first trading date in your simulation. If the market wasn't open on
+        your chosen date, a nearby date will be chosen.
+        [default: datetime.datetime(2007, 5, 22)]
+
+    end_date : `datetime.datetime`, optional
+        The last trading date in your simulation. If the market wasn't open on
+        your chosen date, a nearby date will be chosen.
+        [default: datetime.datetime(2015, 5, 22)]
+
+    sat_rb_freq : float, optional
+        The number of times per year to rebalance the satellite portion of your
+        portfolio. Allowed rebalance frequencies are 1, 2, 3, 4, 6, 8, and 12
+        times per year, as well as 365.25 (daily). [default: 6]
+
+    tot_rb_freq : float, optional
+        The number of times per year to rebalance the entire portfolio, core and
+        satellite. This value must be less than or equal to `sat_rb_freq`.
+        Allowed rebalance frequencies are 1, 2, 3, 4, 6, 8, and 12 times per
+        year. [default: 1]
+
+    reinvest_dividends : boolean, optional
+        When True, any dividends paid out by an asset are used immediately to
+        purchase partial shares of that asset. When False, dividends are taken
+        in as cash and spent on the next rebalance date. [default: False]
     '''
     # earliest start dates: 1998-11-22, 2007-05-22, 2012-10-21
-    def __init__(self, Portfolio,
-                 start_date=datetime(1998, 11, 22),
-                 end_date=datetime(1998, 11, 22) + timedelta(days=365.25*8),
-                 sat_rb_freq=6, tot_rb_freq=1, reinvest_dividends=False,
-                 cash=1e4):
+    def __init__(self, Portfolio, cash=1e4,
+                 start_date=datetime(2007, 5, 22),
+                 end_date=datetime(2007, 5, 22) + timedelta(days=365.25*8),
+                 sat_rb_freq=6, tot_rb_freq=1, reinvest_dividends=False):
         # make sure a PortfolioMaker object is present
         if not isinstance(Portfolio, PortfolioMaker):
             raise ValueError('The first argument of HistoricalSimulator() must '
@@ -73,8 +117,8 @@ class HistoricalSimulator(ABC):
         self._starting_cash = self._cash
 
         # save the core and satellite fractions
-        self.core_frac = np.round(Portfolio._get_label_weights('core').sum(),6)
-        self.sat_frac = np.round(1 - self.core_frac, 6)
+        self.sat_frac = np.round(Portfolio.sat_frac, 6)
+        self.core_frac = np.round(1 - self.sat_frac, 6)
 
         # make DataFrames to track main and benchmark portfolio values over time
         self.strategy_results = pd.DataFrame({
@@ -137,17 +181,16 @@ class HistoricalSimulator(ABC):
     @abstract_attribute
     def burn_in(self):
         '''
-        An attribute (not method) representing the number of days of data
-        needed before a Strategy class can begin trading. For example, a
-        strategy based on a 200-day simple moving average of some asset's price
-        needs `burn_in=200`.
+        An attribute representing the number of days of data needed before a
+        Strategy class can begin trading. For example, a Strategy based on a
+        200-day simple moving average of some asset's price needs `burn_in=200`.
         '''
         pass
 
     @abstractmethod
     def on_new_day(self, ind_all, ind_active):
         '''
-        Called in self.begin_time_loop().
+        Called in HistoricalSimulator.begin_time_loop().
 
         Keeps daily track of whatever indicators are needed to carry out a
         Strategy. See SMAStrategy() for an example, though this method can also
@@ -166,7 +209,8 @@ class HistoricalSimulator(ABC):
     def rebalance_satellite(self, ind_all, ind_active, curr_rb_ind,
                             verbose=False):
         '''
-        Called in self.rebalance_portfolio().
+        Called in HistoricalSimulator.rebalance_portfolio() or
+        HistoricalSimulator.begin_time_loop().
 
         A satellite-only version of self._get_static_rb_changes() that
         re-weights the main portfolio's satellite assets according to an
@@ -649,7 +693,7 @@ class HistoricalSimulator(ABC):
         main_names = np.array(self.core_names + self.sat_names)
         self._make_rb_trades(main_names, deltas, ind_all, verbose=verbose)
 
-        # next, get share changes for benchmark assets (CHECK FOR EXISTENCE?)
+        # next, get share changes for benchmark assets
         bench_deltas = self._get_static_rb_changes(self.bench_names, ind_all,
                                                    main_portfolio=False)
         bench_deltas = np.array(bench_deltas)
@@ -894,7 +938,7 @@ class HistoricalSimulator(ABC):
         my_pr('end date main portfolio value: '
               f"${self.portfolio_value(final):,.02f}")
 
-        my_pr('end date main portfolio holdings: ')
+        my_pr('end date main portfolio shares: ')
         strategy_assets = ([f"{key}: {info['shares']:.1f}"
                             for key, info in self.assets.items()
                             if info['label'] != 'benchmark'])
@@ -913,7 +957,7 @@ class HistoricalSimulator(ABC):
             my_pr('end date benchmark portfolio value: '
                   f"${self.portfolio_value(final, main_portfolio=False):,.02f}")
 
-            my_pr('end date benchmark portfolio holdings: ')
+            my_pr('end date benchmark portfolio shares: ')
             bench_assets = ([f"{key}: {info['shares']:.1f}"
                             for key, info in self.assets.items()
                             if info['label'] == 'benchmark'])
