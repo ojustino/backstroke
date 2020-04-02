@@ -809,6 +809,53 @@ class HistoricalSimulator(ABC):
         self.bench_results['value'] = to_bench_results
         self.cash_over_time['value'] = to_cash_over_time
 
+    def _set_log_axis(self, ax, results):
+        '''
+        Called in `self.plot_results()` and `self.plot_assets()`.
+
+        Ensures that minimum and maximum y values on the y axis of a logarithmic
+        plot are clearly labeled. The methods above place labels at 1, 2.5, 5,
+        and 7.5 of every order of magnitude, so this one finds the next
+        multiple up and down and makes sure they appear on the plot.
+
+        `ax` is the matplotlib.axes._subplots.AxesSubplot object that contains
+        the curves to be plotted.
+
+        `results` is an array containing all of the values to be plotted. The
+        structure doesn't matter; only the minimum and maximum values are used.
+        '''
+        # set minor label locator for y (dollar value) axis
+        ax.yaxis.set_minor_locator(mpl.ticker.LogLocator(base=10,
+                                                         subs=(2.5, 5, 7.5)))
+
+        # find the max/min values in results, separate them into their bases and
+        # exponents in scientific notation, then round up/down to next labels
+        max_result = results.max()
+        max_oom = np.floor((np.log10(max_result)))
+        max_base = max_result / 10**max_oom
+        rounded_max_base = np.ceil(max_base / 2.5) * 2.5
+
+        min_result = results.min()
+        min_oom = np.floor((np.log10(min_result)))
+        min_base = min_result / 10**min_oom
+        rounded_min_base = np.floor(min_base / 2.5) * 2.5
+        if rounded_min_base == 0: # avoid taking log(0)
+            rounded_min_base = 1
+
+        # make a change if the current y maximum is too low
+        target_y_max = rounded_max_base * 10**max_oom
+        curr_y_max = ax.axis()[-1]
+        if curr_y_max < target_y_max:
+            ax.set_ylim(ax.get_ylim()[0], target_y_max)
+
+        # make a change if the current y minimum is too high
+        target_y_min = rounded_min_base * 10**min_oom
+        curr_y_min = ax.axis()[-2]
+        if curr_y_min > target_y_min:
+            ax.set_ylim(target_y_min, ax.get_ylim()[-1])
+
+        return ax
+
     def plot_results(self, show_benchmark=True, logy=False,
                      return_plot=False, verbose=True):
         '''
@@ -875,9 +922,17 @@ class HistoricalSimulator(ABC):
         # plot a line showing the starting amount of cash
         ax.axhline(self._starting_cash, linestyle='--', c='k', alpha=.5)
 
-        # modify some plot settings
+        # if logarithmic, ensure the axes are properly populated
+        if logy:
+            results = (np.stack((self.strategy_results.loc[:, 'value'],
+                                 self.bench_results.loc[:, 'value']))
+                       if show_benchmark
+                       else self.strategy_results.loc[:, 'value'])
+            ax = self._set_log_axis(ax, results)
+
+        # modify other plot settings
         ax.legend(fontsize=14)
-        ax.grid()
+        ax.grid(which='both')
 
         # add dollar signs and comma separators to y ticks
         # (adapted from https://stackoverflow.com/a/25973637 and
@@ -894,14 +949,14 @@ class HistoricalSimulator(ABC):
 
         plt.show()
 
-    def plot_assets(self, tickers, start_value=None, reinvest_dividends=False,
+    def plot_assets(self, *tickers, start_value=None, reinvest_dividends=False,
                     logy=False, return_plot=False, verbose=True):
         '''
         View a plot of assets' individual performances over the course of the
         simulation.
 
-        `tickers` is a list with at least one of the tickers included in
-        `self.assets`.
+        `*tickers` takes at least one string ticker name. All provided names
+        must be among those in `self.assets` or an error will be thrown.
 
         `start_value` is a float representing the amount of money invested in
         each asset on day 1. Its default value is the original value chosen
@@ -923,8 +978,6 @@ class HistoricalSimulator(ABC):
         # confirm that arguments are acceptable
         my_pr = lambda *args, **kwargs: (print(*args, **kwargs)
                                          if verbose else None)
-        if not isinstance(tickers, list):
-            raise ValueError('make sure that `tickers` is a list.')
         for tk in tickers:
             if tk not in self.assets.keys():
                 raise ValueError(f"{tk} is not part of your list of assets.")
@@ -946,12 +999,15 @@ class HistoricalSimulator(ABC):
 
         # make the plot, asset by asset
         fig, ax = plt.subplots(figsize=(10, 10))
-        lw = 1.5#2.5 if len(self.active_dates) < 1000 else 2
+        results = []
         for i, tk in enumerate(tickers):
             # adjust ticker's historical prices so first day is at start_value
             tick_info = self.assets[tk]['df'].loc[:, ['date','adjClose']].copy()
+            tick_info = tick_info.loc[self.burn_in:]
+            tick_info.index = pd.RangeIndex(len(tick_info.index))
             tick_info.loc[:, 'adjClose'] /= tick_info.loc[0, 'adjClose']
             tick_info.loc[:, 'adjClose'] *= start_value
+            results.append(tick_info.loc[:, 'adjClose'])
 
             # find out what type of asset this ticker is and assign color
             tick_type = self.assets[tk]['label']
@@ -966,9 +1022,9 @@ class HistoricalSimulator(ABC):
 
             # add this ticker's data to the plot
             tick_info.plot('date', 'adjClose',
-                                label=f"{tk} ({tick_type})",
-                                lw=lw, c=col,
-                                fontsize=14, logy=logy, ax=ax)
+                           label=f"{tk} ({tick_type})",
+                           lw=1.5, c=col,
+                           fontsize=14, logy=logy, ax=ax)
 
             # print final value of ticker holdings
             my_pr(f"{tk} ending value: "
@@ -977,9 +1033,14 @@ class HistoricalSimulator(ABC):
         # plot a line showing the starting investment value
         ax.axhline(start_value, linestyle='--', c='k', alpha=.5)
 
-        # modify some plot settings
+        # if logarithmic, esnure the axes are properly populated
+        if logy:
+            results = np.array(results)
+            ax = self._set_log_axis(ax, results)
+
+        # modify other plot settings
         ax.legend(fontsize=14)
-        ax.grid()
+        ax.grid(which='both')
 
         # add dollar signs and comma separators to y ticks
         # (adapted from https://stackoverflow.com/a/25973637 and
