@@ -9,7 +9,7 @@ import time
 '''
 This file holds example Strategy classes that inherit from HistoricalSimulator
 and provide the logic for the decisions made in a portfolio's satellite
-portion. The `on_new_day` and `rebalance_satellite` methods and `burn_in` class
+portion. The `on_new_day()` and `rebalance_satellite()` methods and `burn_in`
 attribute are required in order for HistoricalSimulator to work properly. As
 long as you include those, it's also possible to write new Strategy classes
 using your own trading logic.
@@ -21,23 +21,23 @@ ON_NEW_DAY_DOCSTR = HistoricalSimulator.on_new_day.__doc__
 SAT_RB_DOCSTR = HistoricalSimulator.rebalance_satellite.__doc__
 
 class SMAStrategy(HistoricalSimulator):
-    # **target_sma_streak, sma_threshold, & retreat_period should be kwargs**
+    # **target_sma_streak, sma_threshold, & retreat_period should be args**
     '''
     A Strategy that assigns the entire satellite portion of a portfolio to
     either the in-market or out-of-market asset depending on whether a tracked
     asset's current price is above a multiple of its X-day (see `burn_in` in
     "Arguments") simple moving average, or SMA.
 
-    Method `self.on_new_day()` makes this comparison every day and changes
-    `self.can_enter` so the appropriate move is made during the next rebalance.
+    Method self.on_new_day() makes this comparison every day and changes
+    self.can_enter so the appropriate move is made during the next rebalance.
 
     At the moment, requirements for going in are that the tracked asset's price
-    has been above a multiple of its SMA for at least 3 days
-    (`self.sma_streak`), and, if the satellite portion is currently out, that
-    it has been in retreat for at least 60 days (`self.retreat_period`). (The
-    latter requirement is needed because volatility is least predictable when
-    an index is around its SMA, and volatility spikes lead to quick losses with
-    leveraged instruments.) See "Motivation" for sources.
+    has been above a multiple of its SMA for at least 3 days (self.sma_streak),
+    and, if the satellite portion is currently out, that it has been in retreat
+    for at least 60 days (self.retreat_period). (The latter requirement is
+    needed because volatility is least predictable when an index is around its
+    SMA, and volatility spikes lead to quick losses with leveraged instruments.)
+    See "Motivation" for sources.
 
     Arguments
     ---------
@@ -47,7 +47,7 @@ class SMAStrategy(HistoricalSimulator):
         assets, fractions, and categories. SPECIAL TO THIS STRATEGY: Make sure
         one of the assets has a 'track' key that equals True, as that will be
         the asset whose simple moving average is used to make decisions in
-        `self.on_new_day()`.
+        self.on_new_day().
 
     burn_in : float, optional
         An attribute representing the number of days of data needed before a
@@ -69,9 +69,8 @@ class SMAStrategy(HistoricalSimulator):
     actually has a slight correlation at .35.
     (See: https://www.lazardassetmanagement.com/docs/sp0/22430/predictingvolatility_lazardresearch.pdf)
 
-    With this knowledge, we can use the past to predict high volatility
-    periods, which removes some of the risk of using leverage without removing
-    its large upside.
+    With this knowledge, we can use the past to predict high volatility periods,
+    eliminating some of the risk of using leverage without removing its upside.
 
     Tracking a representative index's (e.g., SPY) daily price versus its X-day
     SMA is a proxy for measuring market volatility. When the daily price has
@@ -117,15 +116,25 @@ class SMAStrategy(HistoricalSimulator):
 
     def calc_mv_avg(self, prices, burn_in):
         '''
-        Called from _calc_rolling_smas(). A faster method of calculating moving
-        averages than slicing + np.mean. Takes a column of a pandas DataFrame.
+        Called from self._calc_rolling_smas().
 
+        A faster method of calculating moving averages than slicing + np.mean.
         This method is also about an order of magnitude faster than
-        `prices.rolling(window=burn_in).mean()[burn_in-1:].values`.
+        prices.rolling(window=burn_in).mean()[burn_in-1:].values.
 
         Numerical precision apparently breaks down when len(prices) > 1e7, but
         that's almost 30,000 years worth of days, so no worries currently. May
         have to shift if we use price data with finer resoluion in the future.
+
+        Arguments
+        ---------
+
+        prices : pandas.core.series.Series, required
+            The selection of prices to be averaged.
+
+        burn_in : int, required
+            The number of burn in days in the historical data, as specified upon
+            initializing the class.
 
         Found here, along with concerns: https://stackoverflow.com/a/27681394
         Simplified here: https://stackoverflow.com/a/43286184
@@ -143,9 +152,9 @@ class SMAStrategy(HistoricalSimulator):
         Calculate rolling simple moving average of closing price for each
         ticker. The length of a period is `burn_in`.
 
-        Returns a dictionary with the same keys as `self.assets`. Each key
-        contains an array of rolling simple moving avereages whose indices
-        match up with `self.active_dates`.
+        Returns a dictionary with the same keys as self.assets. Each key
+        contains an array of rolling simple moving averages whose indices match
+        up with self.active_dates.
         '''
         smas = {}
         for nm in self.assets.keys():
@@ -190,18 +199,25 @@ class SMAStrategy(HistoricalSimulator):
         transactions itself. During whole portfolio rebalances, it returns a
         list of share changes for the in-market or out-of-market assets.
 
-        `ind_all` is the integer index of each ticker's historical DataFrame
-        from which to get the price data. It aligns with self.all_dates.
+        Arguments
+        ---------
 
-        `ind_active` is the integer index of self.active_dates that matches the
-        simulation's current date. `ind_all` = `ind_active` + self.burn_in.
+        ind_all : integer, required
+            The index of each ticker's historical DataFrame from which to get
+            the price data. It aligns with self.all_dates.
 
-        `curr_rb_ind` is the integer index of self.rb_indices and self.sat_only.
-        self.sat_only[curr_rb_ind] is True on satellite-only rebalances and
-        False on total rebalances. self.rb_indices[curr_rb_ind] == `ind_all`.
+        ind_active : integer, required
+            The index of self.active_dates that matches the simulation's current
+            date. ind_all = ind_active + self.burn_in.
 
-        `verbose` is a boolean that controls whether or not to print any
-        debugging information you choose to include in this method.
+        curr_rb_ind : integer, required
+            The index of self.rb_indices and self.sat_only.
+            self.sat_only[curr_rb_ind] is True on satellite-only rebalances and
+            False on total rebalances. self.rb_indices[curr_rb_ind] == ind_all.
+
+        verbose : boolean, optional
+            Controls whether or not to print any debugging information you
+            choose to include in this method. [default: False]
         '''
         my_pr = lambda *args, **kwargs: (print(*args, **kwargs)
                                          if verbose else None)
@@ -327,15 +343,15 @@ class VolTargetStrategy(HistoricalSimulator):
     actually has a slight correlation at .35.
     (See: https://www.lazardassetmanagement.com/docs/sp0/22430/predictingvolatility_lazardresearch.pdf)
 
-    If you've already defined a level of volatility you're
-    comfortable with (`vol_target`), you can determine the combination of the
-    two assets that most closely approached it over the previous month, use
-    those allocations over the next month, and be reasonably confident that
-    the combined volatility won't stray too far from your target.
+    If you've already defined a level of volatility you're comfortable with
+    (`vol_target`), you can determine the combination of the two assets that
+    most closely approached it over the previous month, use those allocations
+    over the next month, and be reasonably confident that the combined
+    volatility won't stray too far from your target.
 
     Of course, this is not always the case, but this strategy's gambit is that
     targeting volatility reduces risk compared to a standard SPY/AGG portfolio
-    while still outperforming it most of the time. The jury is out.
+    while still outperforming it most of the time. Let's put it to the test.
     '''
     def __init__(self, Portfolio, burn_in=30, vol_target=.15, **kwargs):
         # save number of burn in days
@@ -362,18 +378,17 @@ class VolTargetStrategy(HistoricalSimulator):
         Called from __init__() of VolTargetStrategy.
 
         Calculate rolling standard deviation for each ticker. The length of a
-        rolling period is `burn_in`.
+        rolling period is self.burn_in.
 
-        Returns a dictionary with the same keys as `self.assets`. Each key
+        Returns a dictionary with the same keys as self.assets. Each key
         contains an array of rolling standard deviations whose indices match up
-        with `self.active_dates`.
+        with self.active_dates.
         '''
         stds = {}
         for nm in self.assets.keys():
             prices = self.assets[nm]['df']['adjClose']
 
             # record asset's daily logartihmic returns
-            #(np.log(prices).diff().rolling(21).std() * np.sqrt(252)).values
             log_ret = np.log(prices).diff().fillna(0) # (change 0th entry to 0)
 
             # collect rolling `burn_in`-day standard deviations; slice out nans
@@ -391,15 +406,14 @@ class VolTargetStrategy(HistoricalSimulator):
         Called from __init__() of VolTargetStrategy.
 
         Calculate rolling inter-asset correlations for all tickers in
-        `self.assets`. Returns a DataFrame that takes two asset labels as
-        indices and gives back an array of correlation values between those
-        assets.
+        self.assets. Returns a DataFrame that takes two asset labels as indices
+        and gives back an array of correlation values between those assets.
 
-        For example, corrs['TICK1']['TICK2'] (provide the ticker strings
-        yourself) gives an array of correlations. The indices of the array
-        match up with the results of _get_moving_stats() & `self.active_dates`.
+        For example, corrs['TICK1']['TICK2'] (provide the ticker strings) gives
+        an array of correlations. The indices of the array match up with the
+        results of self._get_moving_stats() and self.active_dates.
 
-        CHANGE? At the moment, an asset's correlation with itself is NaN instead of an array of 1s. It should save a little time in the loop, but does it matter?
+        At the moment, an asset's correlation with itself is NaN instead of an array of 1s. It should save a little time in the loop, but does it matter?
         '''
         all_keys = list(self.assets.keys())
         rem_keys = all_keys.copy()
@@ -429,24 +443,31 @@ class VolTargetStrategy(HistoricalSimulator):
                             verbose=False):
         '''
         Adjusts the in- and out-of-market portions of the satellite to target
-        the user's chosen volatility.
+        the user's chosen volatility (self.vol_target).
 
         On satellite-only rebalances, the method completes any needed
         transactions itself. During whole portfolio rebalances, it returns a
         list of share changes for the in-market or out-of-market assets.
 
-        `ind_all` is the integer index of each ticker's historical DataFrame
-        from which to get the price data. It aligns with self.all_dates.
+        Arguments
+        ---------
 
-        `ind_active` is the integer index of self.active_dates that matches the
-        simulation's current date. `ind_all` = `ind_active` + self.burn_in.
+        ind_all : integer, required
+            The index of each ticker's historical DataFrame from which to get
+            the price data. It aligns with self.all_dates.
 
-        `curr_rb_ind` is the integer index of self.rb_indices and self.sat_only.
-        self.sat_only[curr_rb_ind] is True on satellite-only rebalances and
-        False on total rebalances. self.rb_indices[curr_rb_ind] == `ind_all`.
+        ind_active : integer, required
+            The index of self.active_dates that matches the simulation's current
+            date. ind_all = ind_active + self.burn_in.
 
-        `verbose` is a boolean that controls whether or not to print any
-        debugging information you choose to include in this method.
+        curr_rb_ind : integer, required
+            The index of self.rb_indices and self.sat_only.
+            self.sat_only[curr_rb_ind] is True on satellite-only rebalances and
+            False on total rebalances. self.rb_indices[curr_rb_ind] == ind_all.
+
+        verbose : boolean, optional
+            Controls whether or not to print any debugging information you
+            choose to include in this method. [default: False]
         '''
         my_pr = lambda *args, **kwargs: (print(*args, **kwargs)
                                          if verbose else None)
