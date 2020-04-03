@@ -10,35 +10,37 @@ import warnings
 
 
 class PortfolioMaker:
+    # INCORPORATE traitlets to do the validation?
     '''
     Create a portfolio of assets to be fed into a simulation. The centerpiece of
-    this class is the `assets` attribute, a dictionary containing the tickers
-    to be used in the simulation and associated information them.
+    this class is self.assets, a dictionary containing the tickers to be used in
+    the simulation and their associated information.
 
-    Portfolios follow the core/satellite model -- a more stable core portion
-    that rebalances its assets to their target weights, and a more volatile
-    satellite portion that balances between a riskier "in-market" asset and a
-    safer "out-of-market" asset depending on indicators from a *Strategy class.
+    Portfolios follow the core/satellite model -- a static core portion whose
+    assets are consistently rebalanced to the same target weights, and a more
+    dynamic satellite portion that can include a riskier "in-market" asset
+    and a safer "out-of-market" asset.
 
-    `assets` can optionally keep track of a separate portfolio of one or more
+    self.assets can optionally keep track of a separate portfolio of one or more
     benchmark assets that follow the same rebalancing schedule as the core
     portion of the main portfolio. Benchmark assets can be used to help make
-    decisions in strategies or just to provide a baseline against which to
-    compare the main core/satellite portfolio.
+    decisions in Strategies or just to provide a baseline against which to
+    measure the main core/satellite portfolio's success.
 
-    The `add_ticker()` method is the primary mechanism for adding information to
-    the `assets` dictionary.
+    The self.add_ticker() method is the primary mechanism for adding information
+    to the assets dictionary.
 
-    Argument `sat_frac` is float/int between 0 and 1 (inclusive) that dictates
-    what (decimal) fraction of the portfolio should be allocated to the
-    satellite portion, with the core taking up the other 1 - `sat_frac`
-    fraction.
+    Arguments
+    ---------
 
-    Argument `relative_core_frac` is a boolean that determines whether the
-    weights entered for core assets are entered as given (if False) or adjusted
-    relative to `sat_frac` (if True).
+    sat_frac : float, required
+        A number between 0 and 1 (inclusive) that dictates what (decimal)
+        fraction of the main portfolio should be allocated to the satellite
+        portion, with the core taking up the other 1 - `sat_frac` fraction.
 
-    INCORPORATE traitlets to do the validation?
+    relative_core_frac : boolean, optional
+        A convenience option that, when True, automatically adjusts individual
+        core assets' fractions when `sat_frac` is changed. [default: True]
     '''
     def __init__(self, sat_frac, relative_core_frac=True):
         # download ticker data
@@ -49,7 +51,7 @@ class PortfolioMaker:
         self.tick_info = pd.DataFrame()
         # will eventually contain rows of assets selected from valid_tix
 
-        # set __init__ arguments to properties so changes are tracked
+        # set __init__'s arguments as properties so changes are tracked
         self._sat_frac = self._validate_fraction(sat_frac)
         self._relative_core_frac = relative_core_frac
 
@@ -57,14 +59,14 @@ class PortfolioMaker:
     def sat_frac(self):
         '''
         Controls how much of the main portfolio is allotted to 'satellite'-
-        labeled tickers in `assets` (as opposed to 'core').
+        labeled tickers in self.assets (as opposed to 'core').
         '''
         return self._sat_frac
 
     @sat_frac.setter
     def sat_frac(self, val):
         '''
-        When `sat_frac` changes and `relative_core_frac` is active, core
+        When self.sat_frac changes and self.relative_core_frac is True, core
         asset fractions are readjusted relative to the new value. Otherwise, the
         change takes place without any further action.
         '''
@@ -88,17 +90,17 @@ class PortfolioMaker:
     def relative_core_frac(self):
         '''
         Controls whether 'core' asset fractions are adjusted based on
-        `sat_only`. If True, each 'core' asset fraction is multiplied by
-        (1 - `sat_frac`) -- the core's fraction of the portfolio.
+        self.sat_only. If True, each 'core' asset fraction is multiplied by
+        (1 - self.sat_frac) -- the core's fraction of the portfolio.
         '''
         return self._relative_core_frac
 
     @relative_core_frac.setter
     def relative_core_frac(self, val):
         '''
-        When `relative_core_frac` changes, core asset fractions are either
-        adjusted relative to `sat_frac` (False to True) or to their originally
-        entered values (True to False).
+        When self.relative_core_frac changes, core asset fractions are either
+        adjusted relative to self.sat_frac (False to True) or to their
+        originally entered values (True to False).
         '''
         # ensure that new value is acceptable
         val = self._validate_relative(val)
@@ -129,7 +131,7 @@ class PortfolioMaker:
         end dates.
 
         For whatever reason, it's not as simple as calling
-        `pd.read_csv(tick_url)`, but a technique I found in
+        pd.read_csv(tick_url), but a technique I found in
         github.com/hydrosquall/tiingo-python/blob/master/tiingo/api does work.
         '''
         TICK_URL = ('https://apimedia.tiingo.com/docs/'
@@ -151,14 +153,20 @@ class PortfolioMaker:
 
         # to view specific tickers:
         # valid_tix[valid_tix['ticker'].isin(['SCHG', 'SCHM', 'EFG',
-        #                                         'BIV', 'LQD', 'ACES'])]
+        #                                    'BIV', 'LQD', 'ACES'])]
 
         return valid_tix
 
     def _validate_fraction(self, fraction):
         '''
-        Ensures the proposed `core`/`benchmark` fraction or `sat_frac` is a
+        Ensures the proposed self.sat_frac or core/benchmark fraction value is a
         number in the proper range.
+
+        Arguments
+        ---------
+
+        fraction : int or float, required
+            The proposed fraction of the portfolio.
         '''
         if (not (isinstance(fraction, int) or isinstance(fraction, float))
             or (not 0 <= fraction <= 1)):
@@ -167,8 +175,18 @@ class PortfolioMaker:
 
     def _validate_label(self, label, in_market):
         '''
-        Ensures the proposed `label` is in the list of permitted names. For
-        satellite assets, also checks whether `in_market` has been set properly.
+        Ensures the proposed label is in the list of permitted names. For
+        satellite assets, also checks whether a market position was specified.
+
+        Arguments
+        ---------
+
+        label : str, required
+            The proposed asset's type -- core, satellite, or benchmark.
+
+        in_market : boolean, required
+            Only needed if `label` == satellite. If True, this asset will be
+            in-market. If False, it will be the out-of-market asset.
         '''
         if label is None:
             label = 'core'
@@ -178,15 +196,22 @@ class PortfolioMaker:
                                  'satellite assets. Please remove an existing '
                                  'entry if you prefer to use this one.')
             self._validate_in_market(in_market)
-        elif label not in ['core', 'satellite', 'benchmark']: # look a using set?
+        elif label not in {'core', 'satellite', 'benchmark'}:
             raise ValueError("Valid `label` options are 'core', 'satellite', "
                              "and 'benchmark'.")
         return label
 
     def _validate_in_market(self, in_market):
         '''
-        Ensures the proposed `in_market` value has been set properly for
-        corresponding satellite assets.
+        Ensures the proposed in_market value has been set properly for a
+        corresponding satellite asset.
+
+        Arguments
+        ---------
+
+        in_market : boolean, required
+            If True, this asset will be in-market. If False, it will be the
+            out-of-market asset.
         '''
         if not isinstance(in_market, bool):
             raise ValueError('Satellite tickers must specify whether they '
@@ -196,7 +221,14 @@ class PortfolioMaker:
 
     def _validate_relative(self, rel_core_frac):
         '''
-        Ensures the proposed `relative_core_frac` value is a boolean.
+        Ensures the proposed self.relative_core_frac value is a boolean.
+
+        Arguments
+        ---------
+
+        rel_core_frac : boolean, required
+            If True, automatically adjusts individual core assets' fractions
+            when self.sat_frac is changed.
         '''
         if not isinstance(rel_core_frac, bool):
             raise TypeError('`relative_core_frac` must be a boolean.')
@@ -205,9 +237,15 @@ class PortfolioMaker:
 
     def _validate_ticker(self, ticker):
         '''
-        Ensures the proposed `ticker` is part of `self._valid_tix`, the
-        DataFrame of tickers supported by Tiingo. Also checks whether `ticker`
-        already exists in `assets`.
+        Ensures the proposed ticker is part of self._valid_tix, the DataFrame of
+        tickers supported by Tiingo. Also checks whether it already exists in
+        self.assets.
+
+        Arguments
+        ---------
+
+        ticker : str, required
+            The symbol of the proposed asset.
         '''
         if ticker not in self._valid_tix['ticker'].values:
             raise ValueError('{ticker} is absent from the Tiingo list of '
@@ -215,33 +253,53 @@ class PortfolioMaker:
 
         if ticker in self.assets.keys():
             raise ValueError('`ticker` value is already a key in `assets`. '
-                             'if you want to replace the entry, Please use '
-                             'remove_ticker() with the proposed `ticker` value '
-                             'first.')
+                             'To replace the entry, first use remove_ticker() '
+                             'on your proposed `ticker` value.')
 
         return ticker
 
     def _get_label_weights(self, label):
         '''
-        Returns an array of weights for tickers in the portfolio with the
-        selected `label` value. The sum of the array gives the total fraction
-        currently taken up by `label`-affiliated assets their portfolio.
+        Returns an array of weights for assets in the portfolio with a certain
+        label. The sum of the array gives the total fraction currently taken up
+        by those assets in their portfolio.
+
+        Arguments
+        ---------
+
+        label : str, required
+            The assets' type -- core, satellite, or benchmark.
         '''
         return np.array([val['fraction'] for val in self.assets.values()
                          if val['label'] == label])
 
     def _get_label_tickers(self, label):
         '''
-        Return a list of all tickers with the given `label` value.
+        Return a list of all tickers with the given label.
+
+        Arguments
+        ---------
+
+        label : str, required
+            The assets' type -- core, satellite, or benchmark.
         '''
         return [tk for tk, val in self.assets.items() if val['label'] == label]
 
     def _get_check_printout(self, label):
         '''
-        Used in self.check_assets(). Print out weighting info for each ticker
-        with the given `label` value. For satellite assets, returns the number
-        currently present in the portfolio (0, 1, or 2). For other labels,
-        returns their current total weight via self._get_label_weights().
+        Used in self.check_assets().
+
+        Print out weighting info for each ticker with a given label value.
+
+        For satellite assets, returns the number currently present in the
+        portfolio (0, 1, or 2). For other labels, returns their current total
+        weight via self._get_label_weights().
+
+        Arguments
+        ---------
+
+        label : str, required
+            The assets' type -- core, satellite, or benchmark.
         '''
         print(f"{label} assets and target holding fraction(s):")
         ticks = self._get_label_tickers(label)
@@ -274,27 +332,42 @@ class PortfolioMaker:
     def add_ticker(self, ticker, fraction=None, label=None, in_market=None,
                    **kwargs):
         '''
-        Create a new entry in `assets` for the given `ticker`. Adds a row of
-        information about the result to `tick_info`. Choices for the other
-        arguments change depending on `label`:
+        Create a new entry in self.assets for the given ticker. Adds a row of
+        information about the result to self.tick_info. Please read "Arguments."
 
-        If `label` == 'core' or `label` == None, a valid `fraction` value
-        between 0 and 1 must be specified.
+        Arguments
+        ---------
 
-        (Note that if relative_core_frac == True, the `fraction` value for core
-        tickers in `assets` will be the one entered by the user *multiplied by
-        sat_frac.*)
+        ticker : str, required
+            The symbol of your desired asset.
 
-        If `label` == 'satellite', `in_market` must be set True or False to
-        indicate which asset to go to when a strategy sends a positive signal
-        and which to retreat to when the strategy sends a negative signal.
+        fraction : float, explained below.
 
-        If `label` == 'benchmark', the same rule applies as for 'core' assets,
-        but `fraction` will always be entered as given since `sat_frac` has no
-        effect on benchmark assets.
+        label : str, required
+            The asset's type -- core, satellite, or benchmark. Choices for the
+            other arguments change depending on your choice here.
 
-        Optionally, you may also add custom keys (perhaps to help with custom
-        Strategy classes) by including additional keyword arguments.
+            If `label` == 'core' or is left blank:
+                -- A valid `fraction` value between 0 and 1 (inclusive) must be
+                specified. (Note that if self.relative_core_frac == True, the
+                `fraction` value for core tickers in self.assets will be the one
+                entered by the user *multiplied by self.sat_frac.*)
+
+            If `label` == 'satellite':
+                -- `in_market` must be set True or False to indicate which
+                asset to go to when a strategy sends a positive signal and
+                which to retreat to when the strategy sends a negative signal.
+
+            If `label` == 'benchmark':
+                -- The same rules apply as for core assets, although `fraction`
+                will always be entered as-is since `sat_frac` has no effect on
+                benchmark assets.
+
+        in_market : boolean, explained above.
+
+        **kwargs : str, optional
+            You may also add custom keys, perhaps to help with custom Strategy
+            classes.
         '''
         ticker = self._validate_ticker(ticker)
 
@@ -329,9 +402,19 @@ class PortfolioMaker:
 
     def edit_ticker_fraction(self, ticker, value):
         '''
-        Change the fraction allocated to a 'core' or 'benchmark' asset that's
-        already been added to `assets`. If `relative_core_frac` == True, 'core'
-        fractions will be adjusted relative to `sat_frac`.
+        Change the fraction allocated to a core or benchmark asset that's
+        already been added to self.assets. If self.relative_core_frac == True,
+        core asset fractions will be adjusted relative to self.sat_frac.
+
+        Arguments
+        ---------
+
+        ticker : str, required
+            The symbol of the core or benchmark asset whose fraction you'd like
+            to change.
+
+        value : float, required
+            The new fraction, which should be between 0 and 1 (inclusive).
         '''
         value = self._validate_fraction(value)
 
@@ -343,8 +426,17 @@ class PortfolioMaker:
 
     def edit_ticker_mkt_status(self, ticker, value):
         '''
-        Change the in-market status of a 'satellite' asset that's already been
-        added to `assets`.
+        Change the in-market status of a satellite asset that's already been
+        added to self.assets.
+
+        Arguments
+        ---------
+
+        ticker : str, required
+            The symbol of your desired satellite asset.
+
+        value : boolean, required
+            The ticker's market status. Is it in-market or out-of-market?
         '''
         if self.assets[ticker]['label'] != 'satellite':
             raise ValueError('This method only modifies satellite assets.')
@@ -354,25 +446,32 @@ class PortfolioMaker:
 
     def remove_ticker(self, ticker):
         '''
-        Remove a ticker's info from `assets` and `tick_info`.
+        Remove a ticker's info from self.assets and self.tick_info.
+
+        Arguments
+        ---------
+
+        ticker : str, required
+            The symbol of the asset you'd like to remove.
         '''
         self.assets.pop(ticker)
         self.tick_info = self.tick_info[self.tick_info != ticker]
 
     def reset_assets(self):
         '''
-        Completely clear `assets` and `tick_info` of all information.
+        Completely clear self.assets and self.tick_info of all information.
         '''
         self.assets = {}
         self.tick_info = pd.DataFrame([])
 
     def check_assets(self):
         '''
-        Used in __init__ of HistoricalSimulator and also free for anytime usage
-        by user. Checks fractions allocated to all tickers in `assets`, first
-        for the core/satellite portfolio and then for the benchmark portfolio.
-        If all tests pass, `assets` is ready to be used in a historical
-        simulation.
+        Used in __init__() of HistoricalSimulator and can also be used
+        independently.
+
+        Checks fractions allocated to all tickers in self.assets, first for the
+        main core/satellite portfolio and then for the benchmark portfolio. If
+        all tests pass, self.assets is ready for use in a historical simulation.
         '''
         core_frac = self._get_check_printout('core')
         num_sat = self._get_check_printout('satellite')

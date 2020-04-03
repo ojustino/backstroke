@@ -14,15 +14,59 @@ MY_API_KEY = '901a2a03f9d57935c22df22ae5a5377cb8de6f22'
 
 class HistoricalSimulator(ABC):
     '''
-    `Portfolio`, `start_date`, `end_date`, `sat_rb_freq`, `tot_rb_freq`,
-    `reinvest_dividends`, and `cash`
+    The parent of a Strategy class that does the heavy lifting in simulating
+    how a portfolio composed of a PortfolioMaker instance's assets would have
+    performed over a specified period of time. Run self.begin_time_loop() after
+    initializing an instance to run a simulation; each instance is good for one
+    simulation only.
+
+    Handles downloading asset data from Tiingo, rebalancing (whole portfolio
+    and satellite-only through its child), dividends, and plotting of
+    post-simulation results. The simulation includes both the main core/
+    satellite portfolio and a standard benchmark portfolio.
+
+    Arguments
+    ---------
+
+    Portfolio : `portfolio_maker.PortfolioMaker`, required
+        A PortfolioMaker instance whose `assets` attribute contains your desired
+        assets, fractions, and categories. Its `check_assets()` method must pass
+        before you can run any simulations.
+
+    cash : float, optional
+        The amount of cash with which to begin investing. [default: $10,000]
+
+    start_date : `datetime.datetime`, optional
+        The first trading date in your simulation. If the market wasn't open on
+        your chosen date, a nearby date will be chosen.
+        [default: datetime.datetime(2007, 5, 22)]
+
+    end_date : `datetime.datetime`, optional
+        The last trading date in your simulation. If the market wasn't open on
+        your chosen date, a nearby date will be chosen.
+        [default: datetime.datetime(2015, 5, 22)]
+
+    sat_rb_freq : float, optional
+        The number of times per year to rebalance the satellite portion of your
+        portfolio. Allowed rebalance frequencies are 1, 2, 3, 4, 6, 8, and 12
+        times per year, as well as 365.25 (daily). [default: 6]
+
+    tot_rb_freq : float, optional
+        The number of times per year to rebalance the entire portfolio, core and
+        satellite. This value must be less than or equal to `sat_rb_freq`.
+        Allowed rebalance frequencies are 1, 2, 3, 4, 6, 8, and 12 times per
+        year. [default: 1]
+
+    reinvest_dividends : boolean, optional
+        When True, any dividends paid out by an asset are used immediately to
+        purchase partial shares of that asset. When False, dividends are taken
+        in as cash and spent on the next rebalance date. [default: False]
     '''
     # earliest start dates: 1998-11-22, 2007-05-22, 2012-10-21
-    def __init__(self, Portfolio,
-                 start_date=datetime(1998, 11, 22),
-                 end_date=datetime(1998, 11, 22) + timedelta(days=365.25*8),
-                 sat_rb_freq=6, tot_rb_freq=1, reinvest_dividends=False,
-                 cash=1e4):
+    def __init__(self, Portfolio, cash=1e4,
+                 start_date=datetime(2007, 5, 22),
+                 end_date=datetime(2007, 5, 22) + timedelta(days=365.25*8),
+                 sat_rb_freq=6, tot_rb_freq=1, reinvest_dividends=False):
         # make sure a PortfolioMaker object is present
         if not isinstance(Portfolio, PortfolioMaker):
             raise ValueError('The first argument of HistoricalSimulator() must '
@@ -73,8 +117,8 @@ class HistoricalSimulator(ABC):
         self._starting_cash = self._cash
 
         # save the core and satellite fractions
-        self.core_frac = np.round(Portfolio._get_label_weights('core').sum(),6)
-        self.sat_frac = np.round(1 - self.core_frac, 6)
+        self.sat_frac = np.round(Portfolio.sat_frac, 6)
+        self.core_frac = np.round(1 - self.sat_frac, 6)
 
         # make DataFrames to track main and benchmark portfolio values over time
         self.strategy_results = pd.DataFrame({
@@ -132,33 +176,37 @@ class HistoricalSimulator(ABC):
                              'in benchmark portfolio.')
         self._bench_cash = value
 
-    # define attribute and methods that must be present in children `Strategy`s
+    # define attribute and methods that must be present a child Strategy class
     # **(make sure to use the listed arguments)**
     @abstract_attribute
     def burn_in(self):
         '''
-        An attribute (not method) representing the number of days of data
-        needed before a Strategy class can begin trading. For example, a
-        strategy based on a 200-day simple moving average of some asset's price
-        needs `burn_in=200`.
+        An attribute representing the number of days of data needed before a
+        Strategy class can begin trading. For example, a Strategy based on a
+        200-day simple moving average of some asset's price needs `burn_in=200`.
         '''
         pass
 
     @abstractmethod
     def on_new_day(self, ind_all, ind_active):
         '''
-        Called in self.begin_time_loop().
+        Called in HistoricalSimulator.begin_time_loop().
 
         Keeps daily track of whatever indicators are needed to carry out a
         Strategy. See SMAStrategy() for an example, though this method can also
         just be a simple `pass` statement (as in VolTargetStrategy()) if
         there's nothing that must be tracked daily.
 
-        `ind_all` is the integer index of each ticker's historical DataFrame
-        from which to get the price data. It aligns with self.all_dates.
+        Arguments
+        ---------
 
-        `ind_active` is the integer index of self.active_dates that matches the
-        simulation's current date. `ind_all` = `ind_active` + self.burn_in.
+        ind_all : integer, required
+            The index of each ticker's historical DataFrame from which to get
+            the price data. It aligns with self.all_dates.
+
+        ind_active : integer, required
+            The index of self.active_dates that matches the simulation's current
+            date. ind_all = ind_active + self.burn_in.
         '''
         pass
 
@@ -166,7 +214,8 @@ class HistoricalSimulator(ABC):
     def rebalance_satellite(self, ind_all, ind_active, curr_rb_ind,
                             verbose=False):
         '''
-        Called in self.rebalance_portfolio().
+        Called in HistoricalSimulator.rebalance_portfolio() or
+        HistoricalSimulator.begin_time_loop().
 
         A satellite-only version of self._get_static_rb_changes() that
         re-weights the main portfolio's satellite assets according to an
@@ -175,18 +224,25 @@ class HistoricalSimulator(ABC):
         self._make_rb_trades() on satellite-only rebalances. In either
         case, the in-market asset's change in shares should be the first entry.
 
-        `ind_all` is the integer index of each ticker's historical DataFrame
-        from which to get the price data. It aligns with self.all_dates.
+        Arguments
+        ---------
 
-        `ind_active` is the integer index of self.active_dates that matches the
-        simulation's current date. `ind_all` = `ind_active` + self.burn_in.
+        ind_all : integer, required
+            The index of each ticker's historical DataFrame from which to get
+            the price data. It aligns with self.all_dates.
 
-        `curr_rb_ind` is the integer index of self.rb_indices and self.sat_only.
-        self.sat_only[curr_rb_ind] is True on satellite-only rebalances and
-        False on total rebalances. self.rb_indices[curr_rb_ind] == `ind_all`.
+        ind_active : integer, required
+            The index of self.active_dates that matches the simulation's current
+            date. ind_all = ind_active + self.burn_in.
 
-        `verbose` is a boolean that controls whether or not to print any
-        debugging information you choose to include in this method.
+        curr_rb_ind : integer, required
+            The index of self.rb_indices and self.sat_only.
+            self.sat_only[curr_rb_ind] is True on satellite-only rebalances and
+            False on total rebalances. self.rb_indices[curr_rb_ind] == ind_all.
+
+        verbose : boolean, optional
+            Controls whether or not to print any debugging information you
+            choose to include in this method. [default: False]
         '''
         pass
 
@@ -197,16 +253,22 @@ class HistoricalSimulator(ABC):
         Return the value of all assets currently held in the portfolio,
         including cash.
 
-        `ind_all` is the integer index of each ticker's historical DataFrame
-        from which to get the price data. It aligns with self.all_dates.
+        Arguments
+        ---------
 
-        If `main_portfolio` == True (default), the method returns the value of
-        main strategy's core/satellite portfolio. If `main_portfolio` == False,
-        the method returns the value of the benchmark portfolio.
+        ind_all : integer, required
+            The index of each ticker's historical DataFrame from which to get
+            the price data. It aligns with self.all_dates.
 
-        If `rebalance` == False (default), asset prices use the current day's
-        (`self.today`) closing price, and if `rebalance` == True, then assets
-        are valuated using the current day's opening price.
+        main_portfolio : boolean, optional
+            If True, the method returns the value of main strategy's core/
+            satellite portfolio. If False, the method returns the value of the
+            benchmark portfolio. [default: True]
+
+        rebalance : boolean, optional
+            If True, asset prices use the current day's (self.today) closing
+            price. If False, assets are valuated using the current day's opening
+            price. [default: False]
         '''
         if not isinstance(rebalance, bool):
             raise ValueError("'rebalance' must be a bool.")
@@ -235,10 +297,26 @@ class HistoricalSimulator(ABC):
 
     def call_tiingo(self, tick, open_date, end_date=datetime.now()):
         '''
-        Called in _build_assets_dict() but can also be used independently.
+        Called in self._build_assets_dict(), but can also be used independently.
 
-        Retrieve historical price data for ticker `tick` from `open_date` to
-        `end_date`, convert it to a DataFrame, then return it.
+        Download an asset's historical price data from Tiingo, convert the
+        result to a pandas DataFrame, then return it.
+
+        Arguments
+        ---------
+
+        tick : str, required
+            The ticker of the asset whose data will be downloaded.
+
+        open_date : `datetime.datetime`, required
+            The earliest date of historical data to be downloaded. (Note that
+            when this method is called upon initializing HistoricalSimulator,
+            this argument is self.open_date, not self.start_date.)
+
+        end_date : `datetime.datetime`, optional
+            The final date of historical data to be downloaded. (When this
+            method is called upon initializing HistoricalSimulator, this
+            argument is self.end_date.) [default: datetime.datetime.now()]
         '''
         open_date = open_date.strftime('%Y-%m-%d') # (e.g. '1998-07-11')
         end_date = end_date.strftime('%Y-%m-%d')
@@ -265,6 +343,15 @@ class HistoricalSimulator(ABC):
         '''
         Check whether any assets will have missing data based on user's proposed
         start and end times for the simulation. If so, throw an error.
+
+        Arguments
+        ---------
+
+        tick_info : `pandas.core.frame.DataFrame`, required
+            A DataFrame with start/end date and asset type (stock, ETF, mutual
+            fund) information. Comes from the `tick_info` attribute of the
+            PortfolioMaker object used to create the current HistoricalSimulator
+            instance.
         '''
         # are all assets active by self.start_date?
         for i, dt in enumerate(tick_info['startDate']):
@@ -294,13 +381,19 @@ class HistoricalSimulator(ABC):
         '''
         Called in __init__() of HistoricalSimulator.
 
-        Verifies that tickers from the `assets` dict in the user's provided
-        instance of the PortfolioMaker class have valid dates. If so, it
-        retrieves historical price data from Tiingo for each.
+        Verifies that proposed assets exist over the range of self.open_date to
+        self.end_date. If so, retrieves their historical price data from Tiingo.
 
-        Then, adds 'df' and 'shares' keys to each `assets[ticker]` dict; their
+        Then, adds 'df' and 'shares' keys to each assets[TICKER] dict; their
         respective values are the returned DataFrame and the number of 'ticker'
         shares currently held (0 to start).
+
+        Arguments
+        ---------
+
+        Portfolio : `portfolio_maker.PortfolioMaker`, required
+            The PortfolioMaker object provided when initializing this
+            HistoricalSimulator instance.
         '''
         # add a standard benchmark portfolio if one wasn't provided
         if len([tk for tk, info in Portfolio.assets.items()
@@ -363,9 +456,11 @@ class HistoricalSimulator(ABC):
 
     def _get_date_arrays(self):
         '''
-        Called in __init__() of HistoricalSimulator. Traverses downloaded
-        historical data and returns an array with all available dates
-        (all_dates) and another with the burn-in dates removed (active_dates).
+        Called in __init__() of HistoricalSimulator.
+
+        Traverses downloaded historical data and returns an array with all
+        available dates (self.all_dates) and another with the burn-in dates
+        removed (self.active_dates).
 
         Also changes self.start_date to the next market day if the user's
         original choice is absent from the data.
@@ -387,32 +482,62 @@ class HistoricalSimulator(ABC):
 
         return all_dates, active_dates
 
-    def _append_or_assign(self, obj, ind, sat_only_is=None):
+    def _append_or_assign(self, obj, ind, is_sat_only_rb=None):
         '''
-        Called in _calc_rebalance_info(). `rb_indices` and `sat_only` can start
-        out as lists or arrays. This method handles that ambiguity by first
-        trying to append argument `ind` to `obj`. This is the case where
-        `rb_indices` and `sat_only` grow one item at a time.
+        Called in self._calc_rebalance_info().
 
-        If append() is not an attribute of `obj`, we revert to flipping the
-        value of index `ind` in `obj`, since `obj` must be an array instead.
-        This is the case where `rb_indices` and `sat_only` are pre-filled and
-        the latter has some indices that needed to be changed from True to
-        False.
+        self.rb_indices and self.sat_only can start out as lists or arrays. This
+        method handles that ambiguity by first trying to append `ind` to `obj`.
+        (This is the case where self.rb_indices and self.sat_only grow one item
+        at a time because self.sat_rb_freq == 365.25.)
+
+        If append() is not an attribute of `obj`, the method reverts to flipping
+        the value of index `ind` in `obj`, since `obj` must be an array instead.
+        (This is the case where self.rb_indices and self.sat_only are pre-filled
+        and the latter has indices that need to be changed from True to False.)
+
+        See self._calc_rebalance_info() for more information on how
+        self.rb_indices and self.sat_only are built.
+
+        Arguments
+        ---------
+
+        obj : list or `numpy.ndarray`, required
+            Is either self.rb_indices or self.sat_only. Its type depends on
+            this instance's satellite rebalance frequency.
+
+        ind : integer, required
+            The index of `obj` that will be appended or flipped.
+
+        is_sat_only_rb: boolean, optional
+            The type of rebalance that will happen on the date that corresponds
+            with `ind` in each asset's historical DataFrame. If True, it's a
+            satellite-only rebalance; if False, it's for the total portfolio.
+            Only use this argument when `obj` == self.sat_only. [default: None]
         '''
-        which = sat_only_is is not None
+        obj_is_sat_only = is_sat_only_rb is not None
         try:
-            obj.append(ind if not which else sat_only_is)
+            obj.append(ind if not obj_is_sat_only else is_sat_only_rb)
         except AttributeError:
             if which: # if sat_only (no changes to array version of rb_indices)
-                obj[ind] = sat_only_is
+                obj[ind] = is_sat_only_rb
 
         return obj
 
     def _last_day_of_month(self, year, month):
         '''
-        Called in _calc_rebalance_info(). Reliably calculate the date of the
-        specified month's final market day.
+        Called in self._calc_rebalance_info().
+
+        Reliably calculate the date of the specified month's final market day.
+
+        Arguments
+        ---------
+
+        year : integer, required
+            The year for the date in question.
+
+        month : integer, required
+            The month for the date in question.
         '''
         next_month = datetime(year, month, 28) + timedelta(days=4)
         return (next_month - timedelta(days=next_month.day)).isoformat()
@@ -421,16 +546,17 @@ class HistoricalSimulator(ABC):
         '''
         Called in __init__() of HistoricalSimulator.
 
-        Uses satellite and total portfolio rebalance frequencies to get an
-        array of the indices of the 'date' column in each ticker's DataFrame
-        that will trigger rebalance events. Returns that with a same-size,
-        associated array that is True when the rebalance is for the satellite
-        portion only and false when it's time for a full portflio rebalance.
+        Uses satellite and total portfolio rebalance frequencies to get
+        self.rb_indices, an array of the indices of each asset's DataFrame that
+        will trigger rebalance events.
 
-        Frequencies of once a month or less will always rebalance on the
-        penultimate market day of a qualifying month to try and avoid whipsawing
-        from larger investors doing their own rebalancing on the last or first
-        market day of the month.
+        Returns that along with self.sat_only, an associated, same-size array
+        that is True when the rebalance is for the satellite portion only and
+        False when it's time for a full portfolio rebalance.
+
+        Non-daily frequencies will rebalance on the penultimate market day of a
+        qualifying month to try and avoid whipsawing from larger investors doing
+        their own rebalancing on the last or first market day of the month.
         '''
         # calculate the months in which to perform each type of rebalance
         all_months = np.arange(1, 13)
@@ -489,7 +615,7 @@ class HistoricalSimulator(ABC):
                     and yr == self.start_date.year):
                     rb_indices = self._append_or_assign(rb_indices, 0)
                     sat_only = self._append_or_assign(sat_only, 0,
-                                                      sat_only_is=False)
+                                                      is_sat_only_rb=False)
                 # in subsequent months, get month's penultimate market day
                 else:
                     last_day = np.datetime64(self._last_day_of_month(yr, mth))
@@ -498,7 +624,7 @@ class HistoricalSimulator(ABC):
                     # note type of rebalance that takes place this month
                     kind = True if mth not in tot_mths else False
                     sat_only = self._append_or_assign(sat_only, penult,
-                                                      sat_only_is=kind)
+                                                      is_sat_only_rb=kind)
 
             yr += 1
         #print(f"{time.time() - go:.3f} s for rebalance info loop")
@@ -511,22 +637,27 @@ class HistoricalSimulator(ABC):
 
     def _get_static_rb_changes(self, names, ind_all, main_portfolio=True):
         '''
-        Called in `rebalance_portfolio()`.
+        Called in self.rebalance_portfolio().
 
-        Returns an array with the changes in shares for the tickers in `names`
-        needed to rebalance the portfolio in question. The method name refers
-        to "static" assets because it only works for assets whose target
-        portfolio percentage does not change -- core or benchmark.
+        Returns an array with the changes in shares for all non-satellite assets
+        in the portfolio in question. These (core or benchmark) assets are
+        "static" because their target allocations do not change over time.
 
-        `ind_all` is the integer index of each ticker's historical DataFrame
-        from which to get the price data. It aligns with self.all_dates.
+        Arguments
+        ---------
 
-        `names` is a list of assets who share the same label; it should
-        typically either be `self.core_names` or `self.bench_names`.
+        names : list, required
+            A list of assets who share the same label; it should typically
+            either be self.core_names or self.bench_names.
 
-        `main_portfolio` decides whether to find changes for the main
-        strategy's core/satellite portfolio (True) or the benchmark portfolio
-        (False).
+        ind_all : integer, required
+            The integer index of each ticker's historical DataFrame from which
+            to get the price data. It aligns with self.all_dates.
+
+        main_portfolio : boolean, optional
+            If True, the method finds share changes for the main strategy's
+            core/satellite portfolio. If False, the method finds share changes
+            for the benchmark portfolio. [default: True]
         '''
         # get total value for portfolio in question
         pf_value = self.portfolio_value(ind_all, main_portfolio=main_portfolio,
@@ -549,29 +680,37 @@ class HistoricalSimulator(ABC):
     def _make_rb_trades(self, names, deltas, ind_all, main_portfolio=True,
                         verbose=False):
         '''
-        Called in `rebalance_portfolio()` or the child Strategy class'
-        `rebalance_satellite()`.
+        Called in self.rebalance_portfolio() or the child Strategy class'
+        rebalance_satellite().
 
         Completes the transactions needed to rebalance a portfolio.
 
-        `names` is an array of assets to rebalance. It should typically be
-        `np.array(self.core_names + self.sat_names)` (if called from
-        rebalance_portfolio()), `np.array(self.sat_names)` alone (if called from
-        rebalance_satellite()), or `np.array(self.bench_names)` (if called from
-        rebalance_portfolio() for the benchmark portfolio).
+        Arguments
+        ---------
 
-        `deltas` is an array with the corresponding share changes for the
-        assets in `names`.
+        names : `numpy.ndarray`, required
+            The string tickers of the assets that will be rebalanced.
+            If called from rebalance_portfolio(), it should be:
+                -- np.array(self.core_names + self.sat_names)
+            If called from rebalance_satellite():
+                -- np.array(self.sat_names)
+            If called from rebalance_portfolio() and `main_portfolio` is False:
+                -- np.array(self.bench_names)
 
-        `ind_all` is the integer index of each ticker's historical DataFrame
-        from which to get the price data. It aligns with self.all_dates.
+        deltas : `numpy.ndarray`, required
+            The corresponding share changes for the assets in `names`.
 
-        `main_portfolio` decides whether to find changes for the main
-        strategy's core/satellite portfolio (True) or the benchmark portfolio
-        (False).
+        ind_all : integer, required
+            The index of each ticker's historical DataFrame from which to get
+            the price data. It aligns with self.all_dates.
 
-        `verbose` is a boolean that controls whether or not to print
-        information on completed trades.
+        main_portfolio : boolean, optional
+            If True, rebalances the main strategy's core/satellite portfolio.
+            If False, rebalances the benchmark portfolio. [default: True]
+
+        verbose : boolean, optional
+            If True, the method prints information on completed trades.
+            [default: False]
         '''
         my_pr = lambda *args, **kwargs: (print(*args, **kwargs)
                                          if verbose else None)
@@ -615,7 +754,7 @@ class HistoricalSimulator(ABC):
     def rebalance_portfolio(self, ind_all, ind_active, curr_rb_ind,
                             verbose=False):
         '''
-        Called in `self.begin_time_loop()`.
+        Called in self.begin_time_loop().
 
         General method that performs a whole-portfolio rebalance by
         re-weighting core assets in-method and gets needed changes for
@@ -629,6 +768,26 @@ class HistoricalSimulator(ABC):
         rebalances should always try to bring the portfolio back to them.
 
         If that changes, perhaps add a specialized rebalance_core() method?
+
+        Arguments
+        ---------
+
+        ind_all : integer, required
+            The index of each ticker's historical DataFrame from which to get
+            the price data. It aligns with self.all_dates.
+
+        ind_active : integer, required
+            The index of self.active_dates that matches the simulation's current
+            date. ind_all = ind_active + self.burn_in.
+
+        curr_rb_ind : integer, required
+            The index of self.rb_indices and self.sat_only.
+            self.sat_only[curr_rb_ind] is True on satellite-only rebalances and
+            False on total rebalances. self.rb_indices[curr_rb_ind] == ind_all.
+
+        verbose : boolean, optional
+            If True, the method prints information on completed trades.
+            [default: False]
         '''
         my_pr = lambda *args, **kwargs: (print(*args, **kwargs)
                                          if verbose else None)
@@ -649,7 +808,7 @@ class HistoricalSimulator(ABC):
         main_names = np.array(self.core_names + self.sat_names)
         self._make_rb_trades(main_names, deltas, ind_all, verbose=verbose)
 
-        # next, get share changes for benchmark assets (CHECK FOR EXISTENCE?)
+        # next, get share changes for benchmark assets
         bench_deltas = self._get_static_rb_changes(self.bench_names, ind_all,
                                                    main_portfolio=False)
         bench_deltas = np.array(bench_deltas)
@@ -661,28 +820,34 @@ class HistoricalSimulator(ABC):
 
     def _check_dividends(self, ind_all, main_portfolio=True, verbose=False):
         '''
-        Called in `self.begin_time_loop()`.
+        Called in self.begin_time_loop().
 
         Checks whether assets currently held in a portfolio are paying out
         dividends on a given day. If so, accepts the dividend as partial shares
-        of that asset if `self.reinvest_dividends` is True, or as cash if False.
+        of that asset if self.reinvest_dividends is True, or as cash if False.
 
         Note that this check happens before any rebalancing transactions because
         one needs to have owned an asset on the day before the dividend
         (the "ex-date") in order to claim the payment.
 
-        `ind_all` is the integer index of each ticker's historical DataFrame
-        from which to get dividend data. It aligns with self.all_dates.
+        (Technically, you need to have owned the asset two business days before
+        the dividend payment date, but this only matters for satellite assets
+        that are rebalanced daily. I likely won't go to this level of specificity.)
 
-        If `main_portfolio` == True (default), the method checks for dividends
-        from the assets in the  main strategy's core/satellite portfolio. If
-        `main_portfolio` == False, it checks assets in the benchmark portfolio.
+        Arguments
+        ---------
 
-        `verbose` is a boolean that controls whether or not to print
-        information about dividends received.
+        ind_all : integer, required
+            The index of each ticker's historical DataFrame from which to get
+            the price data. It aligns with self.all_dates.
 
-        TECHNICALLY, THE ASSET NEEDS TO HAVE BEEN BOUGHT 2 BUSINESS DAYS AGO, NOT 1...
-        MAKE THAT CHANGE? NOT SURE IF I WANT TO SAVE SHARE INFO OVER TIME
+        main_portfolio : boolean, optional
+            If True, rebalances the main strategy's core/satellite portfolio.
+            If False, rebalances the benchmark portfolio. [default: True]
+
+        verbose : boolean, optional
+            If True, prints information when dividends are received in the
+            simulation. [default: False]
         '''
         my_pr = lambda *args, **kwargs: (print(*args, **kwargs)
                                          if verbose else None)
@@ -726,14 +891,18 @@ class HistoricalSimulator(ABC):
         Called in __init__ of HistoricalSimulator or by user????
 
         Step through all avilable dates in the historical data set, tracking and
-        rebalancing the portfolio along the way. Buy at open, track stats at
-        close.
-
-        `verbose` is a boolean that controls whether or not to print the
-        simulation's progress over time.
+        rebalancing the portfolio along the way. Buys stocks based on opening
+        prices and tracks stats based on closing prices.
 
         MIGHT BE NICE TO BE ABLE TO PROVIDE A START DATE AND END DATE, CALCULATE REBALANCES BASED ON THOSE, THEN RUN THE SIMULATION OVER THAT SUBSET.
-        WOULD HAVE TO RE-RUN _calc_rebalance_info() IN HERE AND REMAKE rb_indices AND sat_only.
+        WOULD HAVE TO RE-RUN _calc_rebalance_info() IN HERE AND REMAKE self.rb_indices AND self.sat_only.
+
+        Arguments
+        ---------
+
+        verbose : boolean, optional
+            If True, prints the simulation's progress over time.
+            [default: False]
         '''
         my_pr = lambda *args, **kwargs: (print(*args, **kwargs)
                                          if verbose else None)
@@ -811,18 +980,22 @@ class HistoricalSimulator(ABC):
 
     def _set_log_axis(self, ax, results):
         '''
-        Called in `self.plot_results()` and `self.plot_assets()`.
+        Called in self.plot_results() and self.plot_assets().
 
         Ensures that minimum and maximum y values on the y axis of a logarithmic
         plot are clearly labeled. The methods above place labels at 1, 2.5, 5,
         and 7.5 of every order of magnitude, so this one finds the next
         multiple up and down and makes sure they appear on the plot.
 
-        `ax` is the matplotlib.axes._subplots.AxesSubplot object that contains
-        the curves to be plotted.
+        Arguments
+        ---------
 
-        `results` is an array containing all of the values to be plotted. The
-        structure doesn't matter; only the minimum and maximum values are used.
+        ax : `matplotlib.axes._subplots.AxesSubplot`, required
+            The axis object that contains the plot being generated.
+
+        results : `numpy.ndarray`, required
+            Contains all values that will be plotted on `ax`. The structure
+            doesn't matter; only the minimum and maximum values are used.
         '''
         # set minor label locator for y (dollar value) axis
         ax.yaxis.set_minor_locator(mpl.ticker.LogLocator(base=10,
@@ -861,19 +1034,25 @@ class HistoricalSimulator(ABC):
         '''
         View a plot of your strategy's performance after the simulation is done.
 
-        `show_benchmark` is a boolean that controls whether (True, default) or
-        not (False) to display the benchmark portfolio's performance for
-        purposes of comparison.
+        Arguments
+        ---------
 
-        `logy` is a boolean that controls whether the y-axis (account value in
-        dollars) is on a logarithmic (True) or linear (False, default) scale.
+        show_benchmark : boolean, optional
+            If True, displays the benchmark portfolio's performance for purposes
+            of comparison. [default: True]
 
-        `return_plot` is a boolean that returns the matplotlib figure the plot
-        is drawn on if there are other modifications you'd like to make to it.
-        It is False by default.
+        logy : boolean, optional
+            If True, the y-axis (account value in dollars) will have a
+            logarithmic scale. If False, the scale will be linear.
+            [default: False]
 
-        `verbose` is a boolean that controls whether final portfolio results and
-        holdings are printed out.
+        return_plot : boolean, optional
+            If True, returns the matplotlib axes object the plot is drawn on in
+            case you'd like to modify it further. [default: False]
+
+        verbose : boolean, optional
+            If True, the method prints final portfolio values and holdings.
+            [default: True]
         '''
         my_pr = lambda *args, **kwargs: (print(*args, **kwargs)
                                          if verbose else None)
@@ -894,7 +1073,7 @@ class HistoricalSimulator(ABC):
         my_pr('end date main portfolio value: '
               f"${self.portfolio_value(final):,.02f}")
 
-        my_pr('end date main portfolio holdings: ')
+        my_pr('end date main portfolio shares: ')
         strategy_assets = ([f"{key}: {info['shares']:.1f}"
                             for key, info in self.assets.items()
                             if info['label'] != 'benchmark'])
@@ -913,7 +1092,7 @@ class HistoricalSimulator(ABC):
             my_pr('end date benchmark portfolio value: '
                   f"${self.portfolio_value(final, main_portfolio=False):,.02f}")
 
-            my_pr('end date benchmark portfolio holdings: ')
+            my_pr('end date benchmark portfolio shares: ')
             bench_assets = ([f"{key}: {info['shares']:.1f}"
                             for key, info in self.assets.items()
                             if info['label'] == 'benchmark'])
@@ -952,28 +1131,37 @@ class HistoricalSimulator(ABC):
     def plot_assets(self, *tickers, start_value=None, reinvest_dividends=False,
                     logy=False, return_plot=False, verbose=True):
         '''
-        View a plot of assets' individual performances over the course of the
-        simulation.
+        View a plot of one or more assets' individual performances over the
+        course of the simulation.
 
-        `*tickers` takes at least one string ticker name. All provided names
-        must be among those in `self.assets` or an error will be thrown.
+        Arguments
+        ---------
 
-        `start_value` is a float representing the amount of money invested in
-        each asset on day 1. Its default value is the original value chosen
-        for `self.cash` when this class instance was initialized.
+        *tickers : str, required (at least one)
+            At least one ticker name. All provided tickers must be among those
+            in self.assets or an error is thrown.
 
-        `reinvest_dividends` is a boolean that, if True, reinvests any dividend
-        income back into the asset that paid it out. Coming soon?
+        start_value : float, required
+            The amount of money invested in each asset on day 1. Its default
+            value is the original value chosen for self.cash when this instance
+            was initialized.
 
-        `logy` is a boolean that controls whether the y-axis (account value in
-        dollars) is on a logarithmic (True) or linear (False, default) scale.
+        reinvest_dividends : boolean, optional
+            (Coming soon?) If True, reinvests any dividend income back into the
+            asset that paid it out. [default: False]
 
-        `return_plot` is a boolean that returns the matplotlib figure the plot
-        is drawn on if there are other modifications you'd like to make to it.
-        It is False by default.
+        logy : boolean, optional
+            If True, the y-axis (account value in dollars) will have a
+            logarithmic scale. If False, the scale will be linear.
+            [default: False]
 
-        `verbose` is a boolean that controls whether final portfolio results and
-        holdings are printed out.
+        return_plot : boolean, optional
+            If True, returns the matplotlib axes object the plot is drawn on in
+            case you'd like to modify it further. [default: False]
+
+        verbose : boolean, optional
+            If True, the method prints final value of each asset's holdings.
+            [default: True]
         '''
         # confirm that arguments are acceptable
         my_pr = lambda *args, **kwargs: (print(*args, **kwargs)
