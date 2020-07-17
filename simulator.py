@@ -59,6 +59,12 @@ class HistoricalSimulator(ABC):
         Allowed rebalance frequencies are 1, 2, 3, 4, 6, 8, and 12 times per
         year. [default: 1]
 
+    target_rb_day : integer, optional
+        For rebalance frequencies of one month or more, the market day of the
+        month on which you'd like rebalances to take place. Uses list-style
+        indexing, so both positive and negative values are acceptable as long as
+        their absolute value is 10 or lower. [default: -2]
+
     reinvest_dividends : boolean, optional
         When True, any dividends paid out by an asset are used immediately to
         purchase partial shares of that asset. When False, dividends are taken
@@ -68,11 +74,21 @@ class HistoricalSimulator(ABC):
     def __init__(self, Portfolio, cash=1e4,
                  start_date=datetime(2007, 5, 22),
                  end_date=datetime(2007, 5, 22) + timedelta(days=365.25*8),
-                 sat_rb_freq=6, tot_rb_freq=1, reinvest_dividends=False):
+                 sat_rb_freq=6, tot_rb_freq=1,
+                 target_rb_day=-2, reinvest_dividends=False):
         # make sure a PortfolioMaker object is present
         if not isinstance(Portfolio, PortfolioMaker):
             raise ValueError('The first argument of HistoricalSimulator() must '
                              'be a PortfolioMaker() instance.')
+
+        # ensure that target_rb_day is valid; save it if so
+        if abs(target_rb_day) > 10:
+            raise ValueError('The absolute value of `target_rb_date` must be '
+                             'less than or equal to 10.')
+        elif type(target_rb_day) != int:
+            raise ValueError('`target_rb_date` must be an integer.')
+        else:
+            self._target_rb_day = target_rb_day
 
         # how often a year should we rebalance the satellite portion?
         # and, how often a year should we rebalance the whole portfolio?
@@ -480,19 +496,19 @@ class HistoricalSimulator(ABC):
 
         return all_dates, active_dates
 
-    def _append_or_assign(self, obj, ind, is_sat_only_rb=None):
+    def _modify_rb_vars(self, rb_inds, sat_only, ind, is_sat_only_rb=False):
         '''
         Called in self._calc_rebalance_info().
 
-        self.rb_indices and self.sat_only can start out as lists or arrays. This
-        method handles that ambiguity by first trying to append `ind` to `obj`.
-        (This is the case where self.rb_indices and self.sat_only grow one item
-        at a time because self.sat_rb_freq == 365.25.)
+        `rb_inds` and `sat_only` can start out as lists or arrays. This method
+        handles that ambiguity by first trying to append `ind` to `obj`. (i.e.,
+        the case where self.rb_indices and self.sat_only grow one item at a time
+        because self.sat_rb_freq == 365.25.)
 
-        If append() is not an attribute of `obj`, the method reverts to flipping
-        the value of index `ind` in `obj`, since `obj` must be an array instead.
-        (This is the case where self.rb_indices and self.sat_only are pre-filled
-        and the latter has indices that need to be changed from True to False.)
+        If append() is not an attribute of `rb_inds` or `sat_only`, the method
+        pivots to flipping the value of index `ind` of `sat_only`, since it and
+        `rb_inds` must be arrays instead. (This is the case where both are
+        pre-filled and the latter has indices to change from True to False.)
 
         See self._calc_rebalance_info() for more information on how
         self.rb_indices and self.sat_only are built.
@@ -500,28 +516,28 @@ class HistoricalSimulator(ABC):
         Arguments
         ---------
 
-        obj : list or `numpy.ndarray`, required
-            Is either self.rb_indices or self.sat_only. Its type depends on
-            this instance's satellite rebalance frequency.
+        rb_inds, sat_only : list or `numpy.ndarray`, required
+            Type depends on this class instance's satellite rebalance frequency.
 
         ind : integer, required
-            The index of `obj` that will be appended or flipped.
+            The index of `rb_indices`/`sat_only` to be appended or flipped.
 
         is_sat_only_rb: boolean, optional
             The type of rebalance that will happen on the date that corresponds
             with `ind` in each asset's historical DataFrame. If True, it's a
             satellite-only rebalance; if False, it's for the total portfolio.
-            Only use this argument when `obj` == self.sat_only. [default: None]
+            [default: False]
         '''
-        obj_is_sat_only = is_sat_only_rb is not None
-        try:
-            obj.append(ind if not obj_is_sat_only else is_sat_only_rb)
-        except AttributeError:
-            if obj_is_sat_only:
-                obj[ind] = is_sat_only_rb
-            # else, no need to change anything in array version of rb_indices)
+        # need to check if ind is None (final month scenario)
+        if ind is not None:
+            try:
+                rb_inds.append(ind)
+                sat_only.append(is_sat_only_rb)
+            except AttributeError:
+                sat_only[ind] = is_sat_only_rb
+                # (no changes needed in array version of rb_inds)
 
-        return obj
+        return rb_inds, sat_only
 
     def _last_day_of_month(self, year, month):
         '''
@@ -539,7 +555,68 @@ class HistoricalSimulator(ABC):
             The month for the date in question.
         '''
         next_month = datetime(year, month, 28) + timedelta(days=4)
-        return (next_month - timedelta(days=next_month.day)).isoformat()
+        return next_month - timedelta(days=next_month.day)
+
+    def _get_mth_rb_range(self, yr, mth):
+        '''
+        Called in self._calc_rebalance_info().
+
+        Returns the first and last days of a range of valid, weekday-only
+        rebalance dates for a particular year/month. Based on user's preference
+        for days after the first of a month (or days before the last market day
+        of the month) to rebalance.
+
+        The size of the range depends on the buffer used; if the buffer is 0,
+        the first and last days will be the same. However, use of a buffer is
+        advised since the desired date might fall on a holiday in a given month.
+
+        Arguments
+        ---------
+
+        yr : integer, required
+            The year to consider in calculating rebalance dates.
+
+        mth: integer, required (from 1 to 12)
+            The month to consider in calculating rebalance dates.
+        '''
+        # SHOULD buffer BE AN ARGUMENT?
+
+        # assign target rb date index, reference date, and iteration direction
+        # based on whether rb date is counted from the month's beginning or end
+        if self._target_rb_day < 0:
+            rb_day = -self._target_rb_day - 1
+            ref_day = self._last_day_of_month(yr, mth)
+            iter_day = -1
+        else:
+            rb_day = self._target_rb_day
+            ref_day = datetime(yr, mth, 1)
+            iter_day = 1
+
+        # create object to hold beginning/end dates of range
+        date_range = [] # for short lists, min(list) is faster than array.min()
+
+        # set number for market days to capture in range beyond exact rb date
+        buffer = 2
+
+        # set initial loop date and counter days before/after ref_day
+        dt = ref_day
+        days_beyond_ref = 0
+
+        while True:
+            # only count weekdays as possible options
+            if dt.isoweekday() < 6:
+                if days_beyond_ref == rb_day:
+                    date_range.append(np.datetime64(dt))
+                elif days_beyond_ref == rb_day + buffer:
+                    date_range.append(np.datetime64(dt))
+                    break
+                # iterate the loop's "days beyond rb_day" counter
+                days_beyond_ref += 1
+
+            # iterate the loop's date
+            dt += timedelta(days=iter_day)
+
+        return date_range
 
     def _calc_rebalance_info(self):
         '''
@@ -578,7 +655,7 @@ class HistoricalSimulator(ABC):
 
             # create list of indices of active_dates where rebalances occur
             # and another specifying which type (satellite or total?)
-            rb_indices = []
+            rb_inds = []
             sat_only = []
 
         else: # if daily... (only. in future could do every 2, 3 days and so on)
@@ -588,7 +665,7 @@ class HistoricalSimulator(ABC):
 
             # include every active_date as a possible rebalance date
             # (total rebalance days will be flipped to True in sat_only later)
-            rb_indices = np.arange(len(self.active_dates))
+            rb_inds = np.arange(len(self.active_dates))
             sat_only = np.ones(len(self.active_dates)).astype(bool)
 
         #go = time.time()
@@ -598,9 +675,8 @@ class HistoricalSimulator(ABC):
             months = np.arange(1 if yr != self.start_date.year
                                else self.start_date.month,
                                13 if yr != self.end_date.year
-                               else self.end_date.month)
-            # don't add 1 to end_month in last year -- we don't want it
-            # included because data may not get to its penultimate market day
+                               else self.end_date.month + 1)
+            # end month may not reach a reblance date, but allow for it if so
 
             print(months, yr)
             # limit months to those cleared for rebalance events
@@ -610,26 +686,43 @@ class HistoricalSimulator(ABC):
             # check every month in the current year...
             for mth in eligible:
                 # automatically make start_date a total rebalance event
-                if (mth == self.start_date.month
-                    and yr == self.start_date.year):
-                    rb_indices = self._append_or_assign(rb_indices, 0)
-                    sat_only = self._append_or_assign(sat_only, 0,
+                if (yr == self.start_date.year
+                    and mth == self.start_date.month):
+                    (rb_inds,
+                     sat_only) = self._modify_rb_vars(rb_inds, sat_only, 0,
                                                       is_sat_only_rb=False)
-                # in subsequent months, get month's penultimate market day
+                # in subsequent months, find desired market day for rebalancing
                 else:
-                    last_day = np.datetime64(self._last_day_of_month(yr, mth))
-                    penult = np.where(self.active_dates < last_day)[0][-1]
-                    rb_indices = self._append_or_assign(rb_indices, penult)
-                    # note type of rebalance that takes place this month
+                    # get first and last possible rebalance days (using a range
+                    # instead of a specific day for protection against holidays)
+                    fnl = self._get_mth_rb_range(yr, mth)
+
+                    # save dates that fall within that range
+                    poss = np.where((min(fnl) <= self.active_dates)
+                                    & (self.active_dates <= max(fnl)))[0]
+
+                    # save the last day in the range as this month's rb date
+                    try:
+                        day = poss[-1]
+                    # if there are no dates in that range, use None instead
+                    # (i.e., active_dates' last month cuts off prior to rb date)
+                    except IndexError:
+                        day = None
+                        # NOTE: depending on buffer size in _get_mth_rb_range(),
+                        # rb's could be triggered if sim ends within buffer but
+                        # before target date. not yet sure how to fix this...
+
+                    # update class' rb objects with this month's info
                     kind = True if mth not in tot_mths else False
-                    sat_only = self._append_or_assign(sat_only, penult,
+                    (rb_inds,
+                     sat_only) = self._modify_rb_vars(rb_inds, sat_only, day,
                                                       is_sat_only_rb=kind)
 
             yr += 1
         #print(f"{time.time() - go:.3f} s for rebalance info loop")
 
         # make arrays and shift rb_indices to account for burn-in days
-        rb_indices = np.array(rb_indices) + self.burn_in
+        rb_indices = np.array(rb_inds) + self.burn_in
         sat_only = np.array(sat_only)
 
         return rb_indices, sat_only
@@ -830,8 +923,8 @@ class HistoricalSimulator(ABC):
         (the "ex-date") in order to claim the payment.
 
         (Technically, you need to have owned the asset two business days before
-        the dividend payment date, but this only matters for satellite assets
-        that are rebalanced daily. I likely won't go to this level of specificity.)
+        the dividend payment date, but this only matters for assets that are
+        rebalanced daily. I likely won't go to this level of specificity.)
 
         Arguments
         ---------
