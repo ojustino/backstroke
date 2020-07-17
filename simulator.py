@@ -141,20 +141,8 @@ class HistoricalSimulator(ABC):
         self.sat_frac = np.round(Portfolio.sat_frac, 6)
         self.core_frac = np.round(1 - self.sat_frac, 6)
 
-        # make DataFrames to track main and benchmark portfolio values over time
-        self.strategy_results = pd.DataFrame({
-            'date': self.active_dates,
-            'value': np.zeros(len(self.active_dates))})
-        self.bench_results = self.strategy_results.copy()
-
-        # make DataFrames to track portfolios that are 100% core and 100% sat
-        if self.sat_frac > 0:
-            self.satellite_results = self.strategy_results.copy()
-        if self.core_frac > 0:
-            self.core_results = self.strategy_results.copy()
-
-        # make DataFrame to track free cash in main portfolio over time
-        self.cash_over_time = self.strategy_results.copy()
+        # make DataFrames to track portfolios and cash over time
+        self._create_tracking_arrays()
 
         # save convenience lists of core, satellite, and benchmark asset names
         self.core_names = [key for key, info in self.assets.items()
@@ -356,6 +344,98 @@ class HistoricalSimulator(ABC):
         df = pd.DataFrame.from_dict(resp.json())
         df['date'] = pd.to_datetime(df['date'])
         return df
+
+    def append_a_date(self, date, price_dict):
+        '''
+        A (somewhat hacky) way to add a new date's worth of price data to the
+        'df' attribute of each asset in `self.assets`. Must be run *before*
+        `self.begin_time_loop()`.
+
+        Useful for scenarios where you'd like to do a real life rebalance but
+        lack the current day's info since Tiingo only updates its data after
+        the market closes.
+
+        Arguments
+        ---------
+
+        date : `datetime.datetime`, required
+            The new date to add to the simulation. Must be a weekday.
+
+        price_dict : dict, required
+            A dictionary whose keys are the string ticker symbols of each asset
+            in the current object (must match the keys in `self.assets`) and
+            whose values are floats representing the assets' prices on `date`.
+        '''
+        # ensure the proposed date is valid
+        if np.datetime64(date) <= self.all_dates[-1]:
+            raise ValueError('Proposed date must come after all dates in the '
+                             'current `self.all_dates` array.')
+        elif date.isoweekday() >= 6:
+            raise ValueError('Proposed date must be a weekday.')
+
+        # ensure that a simulation hasn't already been run
+        if np.datetime64(self.today) > self.all_dates[0]:
+            raise IndexError('You may only run `append_a_date()`*before* '
+                             'running a simulation.')
+
+        # ensure that all assets are present in price_dict
+        if set(price_dict.keys()) != set(self.assets.keys()):
+            raise ValueError('Differing assets in proposed dict and '
+                             '`self.assets`. Please include all assets.')
+        elif len(price_dict.keys()) != len(self.assets.keys()):
+            raise ValueError('Differing number of assets in proposed dict and '
+                             '`self.assets`. Ensure that their lengths match.')
+
+        # add new row to each asset's dataFrame of price data
+        for tk, val in self.assets.items():
+            # save original dataFrame length and date of last entry
+            og_len = len(val['df'])
+            og_date = val['df'].loc[og_len - 1, 'date']
+
+            # create new row at index just after the original's end
+            val['df'].loc[og_len] = val['df'].loc[og_len - 1].copy()
+
+            # insert new price data into the new row
+            val['df'].loc[og_len, 'adjOpen'] = price_dict[tk]
+            val['df'].loc[og_len, 'adjClose'] = price_dict[tk]
+
+            # finally, change the date
+            val['df'].loc[og_len, 'date'] = og_date.replace(year=date.year,
+                                                            month=date.month,
+                                                            day=date.day)
+
+        # change class' end date
+        self.end_date = date
+
+        # re-create date and rebalance-related arrays to incorporate new date
+        self.all_dates, self.active_dates = self._get_date_arrays()
+        self.rb_indices, self.sat_only = self._calc_rebalance_info()
+
+        # finally, re-create result tracking arrays
+        self._create_tracking_arrays()
+
+    def _create_tracking_arrays(self):
+        '''
+        Called in self.__init__() or (if run) self.append_a_date().
+
+        Creates arrays that track the main portfolio's value over time, as well
+        as the values of its core/satellite components (if present), the
+        benchmark portfoliio (if present), and of the portfolio's unspent cash.
+        '''
+        # make DataFrames to track main and benchmark portfolio values over time
+        self.strategy_results = pd.DataFrame({
+            'date': self.active_dates,
+            'value': np.zeros(len(self.active_dates))})
+        self.bench_results = self.strategy_results.copy()
+
+        # make DataFrames to track portfolios that are 100% core and 100% sat
+        if self.sat_frac > 0:
+            self.satellite_results = self.strategy_results.copy()
+        if self.core_frac > 0:
+            self.core_results = self.strategy_results.copy()
+
+        # make DataFrame to track free cash in main portfolio over time
+        self.cash_over_time = self.strategy_results.copy()
 
     def _verify_dates(self, tick_info):
         '''
@@ -701,9 +781,9 @@ class HistoricalSimulator(ABC):
                     poss = np.where((min(fnl) <= self.active_dates)
                                     & (self.active_dates <= max(fnl)))[0]
 
-                    # save the last day in the range as this month's rb date
+                    # save last/first day in the range as this month's rb date
                     try:
-                        day = poss[-1]
+                        day = poss[-1 if self._target_rb_day < 0 else 0]
                     # if there are no dates in that range, use None instead
                     # (i.e., active_dates' last month cuts off prior to rb date)
                     except IndexError:
