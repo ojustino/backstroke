@@ -34,7 +34,9 @@ class HistoricalSimulator(ABC):
         before you can run any simulations.
 
     cash : float, optional
-        The amount of cash with which to begin investing. [default: $10,000]
+        The amount of unspent money in your portfolio at the start of the
+        simulation. Note that this is separate from the value of any initial
+        shares held in Portfolio.assets. [default: $10,000]
 
     start_date : `datetime.datetime`, optional
         The first trading date in your simulation. If the market wasn't open on
@@ -96,6 +98,9 @@ class HistoricalSimulator(ABC):
         self.start_date = start_date
         self.end_date = end_date
 
+        # track the current simulation date
+        self.today = self.open_date
+
         # validate proposed asset dictionary, then add historical data to it
         self.assets = self._validate_assets_dict(Portfolio)
 
@@ -113,8 +118,8 @@ class HistoricalSimulator(ABC):
         # (are properties, so an error is thrown if they go negative)
         # (go Decimal here?)
         self._cash = float(cash)
-        self._bench_cash = self._cash
-        self._starting_cash = self._cash
+        self._bench_cash = self.portfolio_value(rebalance=True)
+        self._starting_value = self._bench_cash
 
         # save the core and satellite fractions
         self.sat_frac = np.round(Portfolio.sat_frac, 6)
@@ -134,9 +139,6 @@ class HistoricalSimulator(ABC):
 
         # make DataFrame to track free cash in main portfolio over time
         self.cash_over_time = self.strategy_results.copy()
-
-        # track the current simulation date
-        self.today = self.open_date
 
         # save convenience lists of core, satellite, and benchmark asset names
         self.core_names = [key for key, info in self.assets.items()
@@ -266,8 +268,8 @@ class HistoricalSimulator(ABC):
             benchmark portfolio. [default: True]
 
         rebalance : boolean, optional
-            If True, asset prices use the current day's (self.today) closing
-            price. If False, assets are valuated using the current day's opening
+            If False, asset prices use the current day's (self.today) closing
+            price. If True, assets are valuated using the current day's opening
             price. [default: False]
         '''
         if not isinstance(rebalance, bool):
@@ -276,11 +278,11 @@ class HistoricalSimulator(ABC):
         # get remaining cash for the chosen portfolio
         cash = self.cash if main_portfolio else self.bench_cash
 
-        # if current sim hasn't reached the first trading date, return cash only
-        if self.today < self.start_date:
-            return cash
-
-        # IF ind_all == None do something else... but what???
+        # if sim hasn't reached the first trading date, return portfolio value
+        # on the first trading date
+        if ind_all is None and self.today < self.start_date:
+            ind_all = self.burn_in
+            # rebalance should be set to True in this case...
 
         # determine whether to use open or close prices for assets
         col = 'adjOpen' if rebalance else 'adjClose'
@@ -444,10 +446,6 @@ class HistoricalSimulator(ABC):
             # add the dataframe to the ticker's dictionary information
             info['df'] =  df
 
-            # initialize this asset with zero shares
-            # (go Decimal here?)
-            info['shares'] = 0
-
         # ensure that each asset has the same number of dates
         num_dates = np.unique([len(assets[nm]['df']['date']) for nm in assets])
         assert len(num_dates) == 1, 'some ticker DataFrames are missing dates'
@@ -519,8 +517,9 @@ class HistoricalSimulator(ABC):
         try:
             obj.append(ind if not obj_is_sat_only else is_sat_only_rb)
         except AttributeError:
-            if which: # if sat_only (no changes to array version of rb_indices)
+            if obj_is_sat_only:
                 obj[ind] = is_sat_only_rb
+            # else, no need to change anything in array version of rb_indices)
 
         return obj
 
@@ -1099,7 +1098,7 @@ class HistoricalSimulator(ABC):
             my_pr(', '.join(bench_assets))
 
         # plot a line showing the starting amount of cash
-        ax.axhline(self._starting_cash, linestyle='--', c='k', alpha=.5)
+        ax.axhline(self._starting_value, linestyle='--', c='k', alpha=.5)
 
         # if logarithmic, ensure the axes are properly populated
         if logy:
@@ -1170,7 +1169,7 @@ class HistoricalSimulator(ABC):
             if tk not in self.assets.keys():
                 raise ValueError(f"{tk} is not part of your list of assets.")
         if start_value is None:
-            start_value = self._starting_cash
+            start_value = self._starting_value
         if reinvest_dividends:
             raise NotImplementedError('Coming soon...')
 

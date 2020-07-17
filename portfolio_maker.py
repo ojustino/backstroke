@@ -258,6 +258,29 @@ class PortfolioMaker:
 
         return ticker
 
+    def _validate_shares(self, shares, label):
+        '''
+        Ensures the proposed shares value is valid.
+
+        Arguments
+        ---------
+
+        shares: float, required
+            The initial number of shares of a proposed asset.
+
+        label : str, required
+            The asset's type -- core, satellite, or benchmark. Benchmark assets
+            can't have an initial share count other than 0.
+        '''
+        if shares < 0:
+            raise ValueError('Only positive `shares` values are allowed.')
+        elif label == 'benchmark' and shares != 0:
+            raise ValueError("Only assets with a `label` of 'core' or "
+                             "'satellite' can be initialized with a nonzero "
+                             "number of shares.")
+
+        return shares
+
     def _get_label_weights(self, label):
         '''
         Returns an array of weights for assets in the portfolio with a certain
@@ -329,8 +352,8 @@ class PortfolioMaker:
         print('----------------')
         return label_count
 
-    def add_ticker(self, ticker, fraction=None, label=None, in_market=None,
-                   **kwargs):
+    def add_ticker(self, ticker, fraction=None, in_market=None, label=None,
+                   shares=0, **kwargs):
         '''
         Create a new entry in self.assets for the given ticker. Adds a row of
         information about the result to self.tick_info. Please read "Arguments."
@@ -342,6 +365,8 @@ class PortfolioMaker:
             The symbol of your desired asset.
 
         fraction : float, explained below.
+
+        in_market : boolean, explained below.
 
         label : str, required
             The asset's type -- core, satellite, or benchmark. Choices for the
@@ -363,7 +388,11 @@ class PortfolioMaker:
                 will always be entered as-is since `sat_frac` has no effect on
                 benchmark assets.
 
-        in_market : boolean, explained above.
+        shares : float, optional
+            The number of shares of this ticker that are held at the start of
+            the eventual simulation. Only valid for assets with 'core' or
+            'satellite' label. Useful for calculating rebalances for accounts
+            that already exist. [default: 0]
 
         **kwargs : str, optional
             You may also add custom keys, perhaps to help with custom Strategy
@@ -371,22 +400,25 @@ class PortfolioMaker:
         '''
         ticker = self._validate_ticker(ticker)
 
-        # create dict entry for this asset and add its label
+        # create dict entry for this asset and save its label
         tick = {}
         label = self._validate_label(label, in_market)
         tick['label'] = label
 
         # add fraction or in_market to dict entry (depending on label)
-        # (no else: Error condition needed because label was validated above)
-        if label == 'core':
-            fraction = self._validate_fraction(fraction)
-            tick['fraction'] = (fraction if not self.relative_core_frac
-                                else np.round(fraction * (1-self.sat_frac), 6))
-        elif label == 'benchmark':
-            self._validate_fraction(fraction)
-            tick['fraction'] = fraction
-        elif label == 'satellite':
+        # (no "else: Error" condition needed because label was validated above)
+        if label == 'satellite':
             tick['in_mkt'] = in_market
+        else: # 'core' or 'benchmark'
+            fraction = self._validate_fraction(fraction)
+            tick['fraction'] = (fraction if label == 'benchmark'
+                                or not self.relative_core_frac
+                                else np.round(fraction * (1-self.sat_frac), 6))
+
+        # for core or satellite assets, save initial share count to dict entry
+        # go with Decimal here instead of float???
+        shares = self._validate_shares(shares, label)
+        tick['shares'] = shares
 
         # if any, add kwargs to dict entry
         for key, val in kwargs.items():
