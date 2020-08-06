@@ -21,6 +21,64 @@ ON_NEW_DAY_DOCSTR = HistoricalSimulator.on_new_day.__doc__
 SAT_RB_DOCSTR = HistoricalSimulator.rebalance_satellite.__doc__
 REFRESH_PARENT_DOCSTR = HistoricalSimulator.refresh_parent.__doc__
 
+class BuyAndHoldStrategy(HistoricalSimulator):
+    '''
+    A Strategy class for buying an all-core portfolio of assets that only seeks
+    to invest in them at their original target fractions over time.
+
+    Arguments
+    ---------
+
+    Portfolio : `portfolio_maker.PortfolioMaker`, required
+        A PortfolioMaker instance whose `assets` attribute contains your desired
+        assets, fractions, and categories. **Its `sat_frac` attribute must be 0
+        for it to work with this Strategy.**
+
+    **kwargs : See "Arguments" in the docstring for HistoricalSimulator, but
+    make sure to not use `sat_rb_freq` as it's incompatible with this Strategy.
+    '''
+    def __init__(self, Portfolio, **kwargs):
+        kwargs = self._pre_validate_args(Portfolio, **kwargs)
+
+        self.burn_in = 0 # no burn-in needed for this strategy
+
+        super().__init__(Portfolio, **kwargs)
+
+        # use existing docstrings for unchanged abstract methods
+        self.on_new_day.__func__.__doc__ = ON_NEW_DAY_DOCSTR
+        self.rebalance_satellite.__func__.__doc__ = SAT_RB_DOCSTR
+        self.refresh_parent.__func__.__doc__ = REFRESH_PARENT_DOCSTR
+
+    def _pre_validate_args(self, Portfolio, **kwargs):
+        # satellite fraction must be 0
+        if Portfolio.sat_frac != 0:
+            raise ValueError("This Strategy can't have satellite assets, so "
+                             "the Portfolio object's `sat_frac` must equal 0.")
+            # this being the case, even if there are satellite assets in
+            # Portfolio, they won't affect the simulation
+
+        # if tot_rb_freq is present, set sat_rb_freq equal to it
+        # to avoid satellite-only rebalances
+        if 'tot_rb_freq' in kwargs:
+            kwargs['sat_rb_freq'] = kwargs['tot_rb_freq']
+            # warn the user that this is happening?
+        elif 'sat_rb_freq' in kwargs:
+            raise ValueError("This Strategy doesn't use satellite assets, "
+                             "so `sat_rb_freq` should not be set.")
+        return kwargs
+
+    def refresh_parent(self):
+        # docstring set in __init__()
+        pass
+
+    def on_new_day(self):
+        # docstring set in __init__()
+        pass
+
+    def rebalance_satellite(self, day, verbose=False):
+        # docstring set in __init__()
+        return []
+
 class SMAStrategy(HistoricalSimulator):
     # **target_sma_streak, sma_threshold, & retreat_period should be args**
     '''
@@ -111,7 +169,7 @@ class SMAStrategy(HistoricalSimulator):
         self.retreat_period = 60 # minimum days to remain out after retreating
         self.days_out = 0 # how many consecutive days have you been in retreat?
 
-        # use existing docstrings for on_new_day() and rebalance_satellite()
+        # use existing docstrings for unchanged abstract methods
         self.on_new_day.__func__.__doc__ = ON_NEW_DAY_DOCSTR
         #self.rebalance_satellite.__func__.__doc__ = SAT_RB_DOCSTR
         self.refresh_parent.__func__.__doc__ = REFRESH_PARENT_DOCSTR
@@ -364,7 +422,7 @@ class VolTargetStrategy(HistoricalSimulator):
         # calculate inter-asset correlations
         self.corrs = self._calc_correlations()
 
-        # use existing docstrings for on_new_day() and rebalance_satellite()
+        # use existing docstrings for unchanged abstract methods
         self.on_new_day.__func__.__doc__ = ON_NEW_DAY_DOCSTR
         #self.rebalance_satellite.__func__.__doc__ = SAT_RB_DOCSTR
         self.refresh_parent.__func__.__doc__ = REFRESH_PARENT_DOCSTR
