@@ -19,6 +19,7 @@ using your own trading logic.
 BURN_IN_DOCSTR = HistoricalSimulator.burn_in.__doc__
 ON_NEW_DAY_DOCSTR = HistoricalSimulator.on_new_day.__doc__
 SAT_RB_DOCSTR = HistoricalSimulator.rebalance_satellite.__doc__
+REFRESH_PARENT_DOCSTR = HistoricalSimulator.refresh_parent.__doc__
 
 class SMAStrategy(HistoricalSimulator):
     # **target_sma_streak, sma_threshold, & retreat_period should be args**
@@ -113,14 +114,15 @@ class SMAStrategy(HistoricalSimulator):
         # use existing docstrings for on_new_day() and rebalance_satellite()
         self.on_new_day.__func__.__doc__ = ON_NEW_DAY_DOCSTR
         #self.rebalance_satellite.__func__.__doc__ = SAT_RB_DOCSTR
+        self.refresh_parent.__func__.__doc__ = REFRESH_PARENT_DOCSTR
 
-    def calc_mv_avg(self, prices, burn_in):
+    def calc_mv_avg(self, prices):
         '''
         Called from self._calc_rolling_smas().
 
         A faster method of calculating moving averages than slicing + np.mean.
         This method is also about an order of magnitude faster than
-        prices.rolling(window=burn_in).mean()[burn_in-1:].values.
+        prices.rolling(window=self.burn_in).mean()[self.burn_in-1:].values.
 
         Numerical precision apparently breaks down when len(prices) > 1e7, but
         that's almost 30,000 years worth of days, so no worries currently. May
@@ -132,18 +134,17 @@ class SMAStrategy(HistoricalSimulator):
         prices : pandas.core.series.Series, required
             The selection of prices to be averaged.
 
-        burn_in : int, required
-            The number of burn in days in the historical data, as specified upon
-            initializing the class.
-
         Found here, along with concerns: https://stackoverflow.com/a/27681394
         Simplified here: https://stackoverflow.com/a/43286184
         '''
         #cumsum = np.cumsum(np.insert(prices.values, 0, 0))
-        cumsum = np.cumsum(prices.values)
+        cumsum = np.cumsum(prices)
         #return (cumsum[burn_in:] - cumsum[:-burn_in]) / float(burn_in)
-        cumsum[burn_in:] = cumsum[burn_in:] - cumsum[:-burn_in]
-        return cumsum[burn_in - 1:] / float(burn_in)
+        cumsum[self.burn_in:] = (cumsum[self.burn_in:].values
+                                 - cumsum[:-self.burn_in].values)
+
+        active_ind = cumsum.index.get_loc(self.start_date)
+        return cumsum[active_ind - 1:] / self.burn_in
 
     def _calc_rolling_smas(self):
         '''
@@ -161,13 +162,17 @@ class SMAStrategy(HistoricalSimulator):
             prices = self.assets[nm]['df']['adjClose']
 
             # get array of all `burn_in`-day simple moving averages
-            smas[nm] = self.calc_mv_avg(prices, self.burn_in)
+            smas[nm] = self.calc_mv_avg(prices)
 
         return smas
 
-    def on_new_day(self, ind_all, ind_active): # docstring set in __init__()
-        tracked_price = self.assets[self.track_tick]['df']['adjClose'][ind_all]
-        tracked_sma = self.smas[self.track_tick][ind_active]
+    def refresh_parent(self): # docstring set in __init__()
+        self.smas = self._calc_rolling_smas()
+
+    def on_new_day(self): # docstring set in __init__()
+        tracked_price = self.assets[self.track_tick]['df'].loc[self.today,
+                                                               'adjClose']
+        tracked_sma = self.smas[self.track_tick].loc[self.today]
 
         # check if SMA is over our threshold and adjust streak counters
         if tracked_price >= tracked_sma * self.sma_threshold: # streak builds
@@ -185,8 +190,7 @@ class SMAStrategy(HistoricalSimulator):
             self.can_enter = False
             self.sma_streak = 0
 
-    def rebalance_satellite(self, ind_all, ind_active, curr_rb_ind,
-                            verbose=False):
+    def rebalance_satellite(self, day, verbose=False):
         '''
         Called in HistoricalSimulator.rebalance_portfolio() or
         HistoricalSimulator.begin_time_loop().
@@ -202,18 +206,9 @@ class SMAStrategy(HistoricalSimulator):
         Arguments
         ---------
 
-        ind_all : integer, required
-            The index of each ticker's historical DataFrame from which to get
-            the price data. It aligns with self.all_dates.
-
-        ind_active : integer, required
-            The index of self.active_dates that matches the simulation's current
-            date. ind_all = ind_active + self.burn_in.
-
-        curr_rb_ind : integer, required
-            The index of self.rb_indices and self.sat_only.
-            self.sat_only[curr_rb_ind] is True on satellite-only rebalances and
-            False on total rebalances. self.rb_indices[curr_rb_ind] == ind_all.
+        day : `pandas.Timestamp` or `datetime.datetime`, required
+            The simulation's current date. Used to find whether this rebalance
+            is satellite-only or for the total portfolio.
 
         verbose : boolean, optional
             Controls whether or not to print any debugging information you
@@ -221,7 +216,7 @@ class SMAStrategy(HistoricalSimulator):
         '''
         my_pr = lambda *args, **kwargs: (print(*args, **kwargs)
                                          if verbose else None)
-        my_pr(f"it's a satellite; sat_only is {self.sat_only[curr_rb_ind]}; "
+        my_pr(f"satellite rb; sat_only is {self.rb_info.loc[day, 'sat_only']}; "
               f"${self.cash:.2f} in account")
 
         # exit if there are no satellite assets
@@ -231,14 +226,14 @@ class SMAStrategy(HistoricalSimulator):
 
         # (purchases will be made using TODAY's PRICES, NOT yesterday's closes)
         in_mkt_tick = self.sat_names[0]
-        in_mkt_pr = self.assets[in_mkt_tick]['df']['adjOpen'][ind_all]
+        in_mkt_pr = self.assets[in_mkt_tick]['df'].loc[self.today, 'adjOpen']
         in_mkt_sh = self.assets[in_mkt_tick]['shares']
 
         out_mkt_tick = self.sat_names[-1]
-        out_mkt_pr = self.assets[out_mkt_tick]['df']['adjOpen'][ind_all]
+        out_mkt_pr = self.assets[out_mkt_tick]['df'].loc[self.today, 'adjOpen']
         out_mkt_sh = self.assets[out_mkt_tick]['shares']
 
-        total_mkt_val = self.portfolio_value(ind_all, rebalance=True)
+        total_mkt_val = self.portfolio_value(at_close=False)
 
         # with enough consecutive days above SMA (and a buffer, if necessary)...
         if self.can_enter:
@@ -248,7 +243,7 @@ class SMAStrategy(HistoricalSimulator):
                 out_mkt_delta = -out_mkt_sh
                 out_mkt_cash = out_mkt_sh * out_mkt_pr
 
-                if self.sat_only[curr_rb_ind]: # use all available $$ to buy in
+                if self.rb_info.loc[day, 'sat_only']: # buy in w/ all avail. $$
                     my_pr('1: liq out, buy in')
                     in_mkt_delta = int((self.cash + out_mkt_cash) // in_mkt_pr)
                 else: # if total rebalance, re-weight and return shares to buy
@@ -257,7 +252,7 @@ class SMAStrategy(HistoricalSimulator):
                     return [in_mkt_delta, out_mkt_delta]
             # if already invested in in-market asset...
             else:
-                if self.sat_only[curr_rb_ind]: # already in, so nothing to buy
+                if self.rb_info.loc[day, 'sat_only']: # already in; no change
                     my_pr('3: already in, remain in')
                     in_mkt_delta = out_mkt_delta = 0
                 else: # if total rebalance, find and return net share change
@@ -275,7 +270,7 @@ class SMAStrategy(HistoricalSimulator):
                 in_mkt_delta = -in_mkt_sh
                 in_mkt_cash = in_mkt_sh * in_mkt_pr
 
-                if self.sat_only[curr_rb_ind]: # use all available $$ to retreat
+                if self.rb_info.loc[day, 'sat_only']: # retreat w/ all avail. $$
                     my_pr('5: liq in, buy out')
                     out_mkt_delta = int((self.cash + in_mkt_cash) // out_mkt_pr)
                 else: # if total rebalance, find and return net share change
@@ -284,7 +279,7 @@ class SMAStrategy(HistoricalSimulator):
                     return [in_mkt_delta, out_mkt_delta]
             # if already invested in out-market asset...
             else:
-                if self.sat_only[curr_rb_ind]: # already out, so nothing to buy
+                if self.rb_info.loc[day, 'sat_only']: # already out; no change
                     my_pr('7: already out, remain out')
                     in_mkt_delta = out_mkt_delta = 0
                 else: # if total rebalance, find and return net share change
@@ -298,7 +293,7 @@ class SMAStrategy(HistoricalSimulator):
         # if this is a satellite-only rebalance, complete the trades
         names = np.array(self.sat_names)
         deltas = np.array([in_mkt_delta, out_mkt_delta])
-        self._make_rb_trades(names, deltas, ind_all, verbose=verbose)
+        self.make_rb_trades(names, deltas, verbose=verbose)
 
 class VolTargetStrategy(HistoricalSimulator):
     '''
@@ -372,6 +367,7 @@ class VolTargetStrategy(HistoricalSimulator):
         # use existing docstrings for on_new_day() and rebalance_satellite()
         self.on_new_day.__func__.__doc__ = ON_NEW_DAY_DOCSTR
         #self.rebalance_satellite.__func__.__doc__ = SAT_RB_DOCSTR
+        self.refresh_parent.__func__.__doc__ = REFRESH_PARENT_DOCSTR
 
     def _calc_rolling_stds(self):
         '''
@@ -435,12 +431,15 @@ class VolTargetStrategy(HistoricalSimulator):
 
         return corrs
 
-    def on_new_day(self, ind_all, ind_active):
+    def refresh_parent(self):
         # docstring set in __init__()
         pass
 
-    def rebalance_satellite(self, ind_all, ind_active, curr_rb_ind,
-                            verbose=False):
+    def on_new_day(self):
+        # docstring set in __init__()
+        pass
+
+    def rebalance_satellite(self, day, verbose=False):
         '''
         Adjusts the in- and out-of-market portions of the satellite to target
         the user's chosen volatility (self.vol_target).
@@ -452,18 +451,9 @@ class VolTargetStrategy(HistoricalSimulator):
         Arguments
         ---------
 
-        ind_all : integer, required
-            The index of each ticker's historical DataFrame from which to get
-            the price data. It aligns with self.all_dates.
-
-        ind_active : integer, required
-            The index of self.active_dates that matches the simulation's current
-            date. ind_all = ind_active + self.burn_in.
-
-        curr_rb_ind : integer, required
-            The index of self.rb_indices and self.sat_only.
-            self.sat_only[curr_rb_ind] is True on satellite-only rebalances and
-            False on total rebalances. self.rb_indices[curr_rb_ind] == ind_all.
+        day : `pandas.Timestamp` or `datetime.datetime`, required
+            The simulation's current date. Used to find whether this rebalance
+            is satellite-only or for the total portfolio.
 
         verbose : boolean, optional
             Controls whether or not to print any debugging information you
@@ -471,7 +461,7 @@ class VolTargetStrategy(HistoricalSimulator):
         '''
         my_pr = lambda *args, **kwargs: (print(*args, **kwargs)
                                          if verbose else None)
-        my_pr(f"it's a satellite; sat_only is {self.sat_only[curr_rb_ind]}; "
+        my_pr(f"satellite rb; sat_only is {self.rb_info.loc[day, 'sat_only']}; "
               f"${self.cash:.2f} in account")
 
         # exit if there are no satellite assets
@@ -482,19 +472,19 @@ class VolTargetStrategy(HistoricalSimulator):
         # What are my current satellite holdings worth?
         # (purchases will be made using TODAY's PRICES, NOT yesterday's closes)
         in_mkt_tick = self.sat_names[0]
-        in_mkt_pr = self.assets[in_mkt_tick]['df']['adjOpen'][ind_all]
+        in_mkt_pr = self.assets[in_mkt_tick]['df'].loc[self.today, 'adjOpen']
         in_mkt_sh = int(self.assets[in_mkt_tick]['shares'])
         in_mkt_val = in_mkt_pr * in_mkt_sh
 
         out_mkt_tick = self.sat_names[-1]
-        out_mkt_pr = self.assets[out_mkt_tick]['df']['adjOpen'][ind_all]
+        out_mkt_pr = self.assets[out_mkt_tick]['df'].loc[self.today, 'adjOpen']
         out_mkt_sh = int(self.assets[out_mkt_tick]['shares'])
         out_mkt_val = out_mkt_pr * out_mkt_sh
 
         # What can i spend during this rebalance?
-        total_mkt_val = self.portfolio_value(ind_all, rebalance=True)
+        total_mkt_val = self.portfolio_value(at_close=False)
         can_spend = ((in_mkt_val + out_mkt_val + self.cash)
-                     if self.sat_only[curr_rb_ind]
+                     if self.rb_info.loc[day, 'sat_only']
                      else total_mkt_val * self.sat_frac)
         # (available sum to spend depends on rebalance type)
 
@@ -562,10 +552,10 @@ class VolTargetStrategy(HistoricalSimulator):
         my_pr(f"out_mkt_delta: {out_mkt_delta}, out_mkt_val: {out_mkt_val}, out_mkt_pr: {out_mkt_pr}")
         deltas = [in_mkt_delta, out_mkt_delta]
 
-        # Return share change values if this is an entire-portfolio rebalance
-        if not self.sat_only[curr_rb_ind]:
+        # Return share change values if this is a total-portfolio rebalance
+        if not self.rb_info.loc[day, 'sat_only']:
             return deltas
         else: # If this is a satellite-only rebalance, make the trades
             names = np.array(self.sat_names)
             deltas = np.array(deltas)
-            self._make_rb_trades(names, deltas, ind_all, verbose=verbose)
+            self.make_rb_trades(names, deltas, verbose=verbose)
