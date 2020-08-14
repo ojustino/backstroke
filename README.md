@@ -1,5 +1,7 @@
 ## `backstroke` 💧
-[![Binder](https://mybinder.org/badge_logo.svg)](https://mybinder.org/v2/gh/ojustino/backstroke/master?filepath=example.ipynb)
+[![Binder](https://mybinder.org/badge_logo.svg)](https://mybinder.org/v2/gh/ojustino/backstroke/master?filepath=walkthrough.ipynb)
+<br>
+*( ^ click above to run in the cloud)*
 
 A Python package that allows users to create portfolio Strategy classes based
 on a "safe core, risky satellite" model and simulate their performances on
@@ -26,7 +28,8 @@ object-oriented programming with abstract base classes, visualization with
 ### Example usage:
 
 Read through
-[`query_examples.ipynb`](https://github.com/ojustino/tennis-abs-api/blob/master/query_examples.ipynb)
+[`walkthrough.ipynb`](https://github.com/ojustino/tennis-abs-api/blob/master/walkthrough.ipynb)
+and [`buy_and_hold.ipynb`](https://github.com/ojustino/tennis-abs-api/blob/master/walkthrough.ipynb)
 for a quick introduction.
 
 ### Installation ***(coming soon)***:

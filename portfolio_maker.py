@@ -308,7 +308,7 @@ class PortfolioMaker:
         '''
         return [tk for tk, val in self.assets.items() if val['label'] == label]
 
-    def _get_check_printout(self, label):
+    def _get_check_printout(self, label, verbose):
         '''
         Used in self.check_assets().
 
@@ -323,33 +323,39 @@ class PortfolioMaker:
 
         label : str, required
             The assets' type -- core, satellite, or benchmark.
+
+        verbose : boolean, required
+            Whether or not to print debugging information.
         '''
-        print(f"{label} assets and target holding fraction(s):")
+        my_pr = lambda *args, **kwargs: (print(*args, **kwargs)
+                                         if verbose else None)
+
+        my_pr(f"{label} assets and target holding fraction(s):")
         ticks = self._get_label_tickers(label)
 
         if label != 'satellite':
             if len(ticks) > 0:
                 fracs = self._get_label_weights(label)
                 for i, fr in enumerate(fracs):
-                    print(f"{fr*100:.5f}% in {ticks[i]}")
+                    my_pr(f"{fr*100:.5f}% in {ticks[i]}")
 
                 label_count = fracs.sum()
-                print(f"*** {label_count*100:.5f}% in {label} overall ***")
+                my_pr(f"*** {label_count*100:.5f}% in {label} overall ***")
             else:
                 label_count = 0
-                print('None.')
+                my_pr('None.')
         else:
             if len(ticks) > 0:
                 for tk in ticks:
                     in_mkt = self.assets[tk]['in_mkt']
-                    print(f"{'in' if in_mkt else 'out-of'}-market asset: "
+                    my_pr(f"{'in' if in_mkt else 'out-of'}-market asset: "
                           f"{'    ' if in_mkt else ''}{tk}")
             else:
-                print('None.')
+                my_pr('None.')
             label_count = len(ticks)
-            print(f"*** {self.sat_frac*100:.5f}% in {label} overall ***")
+            my_pr(f"*** {self.sat_frac*100:.5f}% in {label} overall ***")
 
-        print('----------------')
+        my_pr('----------------')
         return label_count
 
     def add_ticker(self, ticker, fraction=None, in_market=None, label=None,
@@ -496,7 +502,7 @@ class PortfolioMaker:
         self.assets = {}
         self.tick_info = pd.DataFrame([])
 
-    def check_assets(self):
+    def check_assets(self, verbose=True):
         '''
         Used in __init__() of HistoricalSimulator and can also be used
         independently.
@@ -504,9 +510,18 @@ class PortfolioMaker:
         Checks fractions allocated to all tickers in self.assets, first for the
         main core/satellite portfolio and then for the benchmark portfolio. If
         all tests pass, self.assets is ready for use in a historical simulation.
+
+        Arguments
+        ---------
+
+        verbose : boolean, optional
+            Whether or not to print debugging information. [default: True]
         '''
-        core_frac = self._get_check_printout('core')
-        num_sat = self._get_check_printout('satellite')
+        my_pr = lambda *args, **kwargs: (print(*args, **kwargs)
+                                         if verbose else None)
+
+        core_frac = self._get_check_printout('core', verbose)
+        num_sat = self._get_check_printout('satellite', verbose)
 
         if np.round(core_frac + self.sat_frac, 5) != 1:
             raise ValueError('Make sure core and satellite fractions add up '
@@ -532,9 +547,9 @@ class PortfolioMaker:
                 warnings.warn('Two satellite assets have been chosen, but '
                               f"`sat_frac` is 0%. Is that intentional?")
 
-        print('-----passed-----')
-        print('----------------')
-        bench_frac = self._get_check_printout('benchmark')
+        my_pr('-----passed-----')
+        my_pr('----------------')
+        bench_frac = self._get_check_printout('benchmark', verbose)
         bench_ticks = self._get_label_tickers('benchmark')
 
         if not (   (bench_frac == 0 and len(bench_ticks) == 0)
@@ -543,4 +558,4 @@ class PortfolioMaker:
                              'fractions add up to 1 (100%) before running '
                              'simulations.')
 
-        print('-----passed-----\n')
+        my_pr('-----passed-----\n')

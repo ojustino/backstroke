@@ -69,13 +69,16 @@ class HistoricalSimulator(ABC):
         When True, any dividends paid out by an asset are used immediately to
         purchase partial shares of that asset. When False, dividends are taken
         in as cash and spent on the next rebalance date. [default: False]
+
+    verbose : boolean, optional
+        Whether or not to print the download's progress. [default: False]
     '''
     # earliest start dates: 1998-11-22, 2007-05-22, 2012-10-21
     def __init__(self, Portfolio, cash=1e4,
                  start_date=pd.Timestamp(2007, 5, 22),
                  end_date=pd.Timestamp(2015, 5, 22),
-                 sat_rb_freq=6, tot_rb_freq=1,
-                 target_rb_day=-2, reinvest_dividends=False):
+                 sat_rb_freq=6, tot_rb_freq=1, target_rb_day=-2,
+                 reinvest_dividends=False, verbose=False):
         # make sure a PortfolioMaker object is present
         if not isinstance(Portfolio, PortfolioMaker):
             raise ValueError('The first argument of HistoricalSimulator() must '
@@ -118,13 +121,13 @@ class HistoricalSimulator(ABC):
         self.today = self.open_date
 
         # validate proposed asset dictionary, then add historical data to it
-        self.assets = self._validate_assets_dict(Portfolio)
+        self.assets = self._validate_assets_dict(Portfolio, verbose)
 
         # make arrays of all dates in set and all *active* dates (sans burn-in)
         self.all_dates, self.active_dates = self._get_date_arrays()
 
         # on which dates do rebalances occur, and are they satellite-only?
-        self.rb_info = self._calc_rebalance_info()
+        self.rb_info = self._calc_rebalance_info(verbose)
 
         # save preference for handling dividend payouts
         self.reinvest_dividends = reinvest_dividends
@@ -310,7 +313,8 @@ class HistoricalSimulator(ABC):
 
         return cash + holdings
 
-    def call_tiingo(self, tick, open_date, end_date=pd.to_datetime('now')):
+    def call_tiingo(self, tick, open_date,
+                    end_date=pd.to_datetime('now'), verbose=True):
         '''
         Called in self._build_assets_dict(), but can also be used independently.
 
@@ -332,11 +336,16 @@ class HistoricalSimulator(ABC):
             The final date of historical data to be downloaded. (When this
             method is called upon initializing HistoricalSimulator, this
             argument is self.end_date.) [default: pandas.to_datetime('now')]
+
+        verbose : boolean, optional
+            Whether or not to print the download's progress. [default: True]
         '''
         open_date = open_date.strftime('%Y-%m-%d') # (e.g. '1998-07-13')
         end_date = end_date.strftime('%Y-%m-%d')
-        print(f"{tick} from {open_date} to {end_date}...")
+        if verbose:
+            print(f"{tick} from {open_date} to {end_date}...")
 
+        url = f"https://api.tiingo.com/tiingo/daily/{tick}/prices"
         headers = {'Content-Type': 'application/json'}
         params = {
             'startDate': open_date,
@@ -346,7 +355,6 @@ class HistoricalSimulator(ABC):
             'token': MY_API_KEY,
         }
 
-        url = f"https://api.tiingo.com/tiingo/daily/{tick}/prices"
         resp = requests.get(url, params=params, headers=headers)
         assert resp.status_code == 200, f"HTTP status code {resp.status_code}"
 
@@ -357,7 +365,7 @@ class HistoricalSimulator(ABC):
 
         return df
 
-    def append_date(self, date, price_dict):
+    def append_date(self, date, price_dict, verbose=False):
         '''
         A (somewhat hacky) way to add a new date's worth of price data to the
         'df' attribute of each asset in `self.assets`. Must be run *before*
@@ -378,6 +386,9 @@ class HistoricalSimulator(ABC):
             A dictionary whose keys are the string ticker symbols of each asset
             in the current object (must match the keys in `self.assets`) and
             whose values are floats representing the assets' prices on `date`.
+
+        verbose : boolean, optional
+            Whether to print rebalance month information. [default: False]
         '''
         # ensure the proposed date is valid
         date = pd.Timestamp(date)
@@ -414,7 +425,7 @@ class HistoricalSimulator(ABC):
 
         # include new date in the date arrays and the rebalance dataFrame
         self.all_dates, self.active_dates = self._get_date_arrays()
-        self.rb_info = self._calc_rebalance_info()
+        self.rb_info = self._calc_rebalance_info(verbose)
 
         # re-create result tracking arrays
         self._create_tracking_arrays()
@@ -483,7 +494,7 @@ class HistoricalSimulator(ABC):
                                  'Try an earlier end date or choose a '
                                  'different ticker.')
 
-    def _validate_assets_dict(self, Portfolio):
+    def _validate_assets_dict(self, Portfolio, verbose):
         '''
         Called in __init__() of HistoricalSimulator.
 
@@ -500,6 +511,9 @@ class HistoricalSimulator(ABC):
         Portfolio : `portfolio_maker.PortfolioMaker`, required
             The PortfolioMaker object provided when initializing this
             HistoricalSimulator instance.
+
+        verbose : boolean, required
+            Whether or not to print output from Portfolio.check_assets().
         '''
         # add a standard benchmark portfolio if one wasn't provided
         if len([tk for tk, info in Portfolio.assets.items()
@@ -534,7 +548,7 @@ class HistoricalSimulator(ABC):
             # else, the benchmark portfolio remains empty
 
         # run Portfolio's own validation function to be thorough
-        Portfolio.check_assets()
+        Portfolio.check_assets(verbose)
 
         # verify that all assets are present over the user's entire date range
         self._verify_dates(Portfolio.tick_info)
@@ -545,7 +559,7 @@ class HistoricalSimulator(ABC):
 
         for tick, info in assets.items():
             # get daily open/close data from Tiingo
-            df = self.call_tiingo(tick, self.open_date, self.end_date)
+            df = self.call_tiingo(tick, self.open_date, self.end_date, verbose)
 
             # add the dataframe to the ticker's dictionary information
             info['df'] =  df
@@ -708,14 +722,23 @@ class HistoricalSimulator(ABC):
 
         return date_range
 
-    def _calc_rebalance_info(self):
+    def _calc_rebalance_info(self, verbose):
         '''
         Called in __init__() of HistoricalSimulator.
 
         Uses satellite and total portfolio rebalance frequencies to create
         `self.rb_info`, a dataFrame of this instance's rebalance dates and their
         types (satellite-only if True, total portfolio if False).
+
+        Arguments
+        ---------
+
+        verbose : boolean, required
+            Whether or not to print rebalance month information.
         '''
+        my_pr = lambda *args, **kwargs: (print(*args, **kwargs)
+                                         if verbose else None)
+
         # calculate the months in which to perform each type of rebalance
         all_months = np.arange(1, 13)
 
@@ -733,7 +756,7 @@ class HistoricalSimulator(ABC):
 
             # give total rebalances priority over satellite-only
             sat_mths = sat_mths[~np.in1d(sat_mths, tot_mths)]
-            print('sat', sat_mths, '\ntot', tot_mths)
+            my_pr('sat rb mths:', sat_mths, '\ntot rb mths:', tot_mths)
 
             # create list of dates when rebalances occur...
             # and another specifying which type -- satellite or total
@@ -743,7 +766,7 @@ class HistoricalSimulator(ABC):
         else: # if daily... (only. in future could do every 2, 3 days and so on)
             # ...then every month has rebalance events
             sat_mths = all_months
-            print('sat', sat_mths, '\ntot', tot_mths)
+            my_pr('sat rb mths:', sat_mths, '\ntot rb mths:', tot_mths)
 
             # include every active_date as a possible rebalance date
             # (total rebalance days will be flipped to True in sat_only later)
@@ -753,6 +776,7 @@ class HistoricalSimulator(ABC):
                                               dtype=bool))
 
         #go = time.time()
+        my_pr('all sim mths:')
         yr = self.start_date.year
         while yr <= self.end_date.year:
             # make array with all eligible months
@@ -762,7 +786,7 @@ class HistoricalSimulator(ABC):
                                else self.end_date.month + 1)
             # end month may not reach a reblance date, but allow for it if so
 
-            print(months, yr)
+            my_pr(months, yr)
             # limit months to those cleared for rebalance events
             eligible = [mth for mth in months
                         if mth in tot_mths or mth in sat_mths]
@@ -804,7 +828,7 @@ class HistoricalSimulator(ABC):
                                                       is_sat_only_rb=kind)
 
             yr += 1
-        #print(f"{time.time() - go:.3f} s for rebalance info loop")
+        #my_pr(f"{time.time() - go:.3f} s for rebalance info loop")
 
         # make dataFrame of rebalance info with index of active dates
         rb_info = pd.DataFrame({'sat_only': sat_only})
