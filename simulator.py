@@ -1,6 +1,6 @@
 #!/usr/bin/python3
 from better_abc import ABC, abstract_attribute, abstractmethod
-from datetime import datetime, timedelta
+from datetime import timedelta
 from portfolio_maker import PortfolioMaker
 import matplotlib as mpl
 import matplotlib.pyplot as plt
@@ -34,17 +34,19 @@ class HistoricalSimulator(ABC):
         before you can run any simulations.
 
     cash : float, optional
-        The amount of cash with which to begin investing. [default: $10,000]
+        The amount of unspent money in your portfolio at the start of the
+        simulation. Note that this is separate from the value of any initial
+        shares held in Portfolio.assets. [default: $10,000]
 
-    start_date : `datetime.datetime`, optional
+    start_date : `pandas.Timestamp` or `datetime.datetime`, optional
         The first trading date in your simulation. If the market wasn't open on
-        your chosen date, a nearby date will be chosen.
-        [default: datetime.datetime(2007, 5, 22)]
+        your chosen date, the next market date will be chosen.
+        [default: pandas.Timestamp(2007, 5, 22)]
 
-    end_date : `datetime.datetime`, optional
+    end_date : `pandas.Timestamp` or `datetime.datetime`, optional
         The last trading date in your simulation. If the market wasn't open on
-        your chosen date, a nearby date will be chosen.
-        [default: datetime.datetime(2015, 5, 22)]
+        your chosen date, the last market date before it will be chosen.
+        [default: pandas.Timestamp(2015, 5, 22)]
 
     sat_rb_freq : float, optional
         The number of times per year to rebalance the satellite portion of your
@@ -57,20 +59,39 @@ class HistoricalSimulator(ABC):
         Allowed rebalance frequencies are 1, 2, 3, 4, 6, 8, and 12 times per
         year. [default: 1]
 
+    target_rb_day : integer, optional
+        For rebalance frequencies of one month or more, the market day of the
+        month on which you'd like rebalances to take place. Uses list-style
+        indexing, so both positive and negative values are acceptable as long as
+        their absolute value is 13 or lower. [default: -2]
+
     reinvest_dividends : boolean, optional
         When True, any dividends paid out by an asset are used immediately to
         purchase partial shares of that asset. When False, dividends are taken
         in as cash and spent on the next rebalance date. [default: False]
+
+    verbose : boolean, optional
+        Whether or not to print the download's progress. [default: False]
     '''
     # earliest start dates: 1998-11-22, 2007-05-22, 2012-10-21
     def __init__(self, Portfolio, cash=1e4,
-                 start_date=datetime(2007, 5, 22),
-                 end_date=datetime(2007, 5, 22) + timedelta(days=365.25*8),
-                 sat_rb_freq=6, tot_rb_freq=1, reinvest_dividends=False):
+                 start_date=pd.Timestamp(2007, 5, 22),
+                 end_date=pd.Timestamp(2015, 5, 22),
+                 sat_rb_freq=6, tot_rb_freq=1, target_rb_day=-2,
+                 reinvest_dividends=False, verbose=False):
         # make sure a PortfolioMaker object is present
         if not isinstance(Portfolio, PortfolioMaker):
             raise ValueError('The first argument of HistoricalSimulator() must '
                              'be a PortfolioMaker() instance.')
+
+        # ensure that target_rb_day is valid; save it if so
+        if abs(target_rb_day) > 13:
+            raise ValueError('The absolute value of `target_rb_date` must be '
+                             'less than or equal to 13.')
+        elif type(target_rb_day) != int:
+            raise ValueError('`target_rb_date` must be an integer.')
+        else:
+            self._target_rb_day = target_rb_day
 
         # how often a year should we rebalance the satellite portion?
         # and, how often a year should we rebalance the whole portfolio?
@@ -90,21 +111,23 @@ class HistoricalSimulator(ABC):
         # real days to approx. market days) and subtract result from start_date
         mkt_to_real_days = 365.25 / 252.75 # denominator is avg mkt days in year
         buffer_days = int(self.burn_in * mkt_to_real_days) + 5
-        self.open_date = start_date - timedelta(buffer_days)
+        self.open_date = pd.Timestamp(start_date - timedelta(buffer_days))
 
         # save dates over which analysis will take place
-        self.start_date = start_date
-        self.end_date = end_date
+        self.start_date = pd.Timestamp(start_date)
+        self.end_date = pd.Timestamp(end_date)
+
+        # track the current simulation date
+        self.today = self.open_date
 
         # validate proposed asset dictionary, then add historical data to it
-        self.assets = self._validate_assets_dict(Portfolio)
+        self.assets = self._validate_assets_dict(Portfolio, verbose)
 
         # make arrays of all dates in set and all *active* dates (sans burn-in)
         self.all_dates, self.active_dates = self._get_date_arrays()
 
-        # at which indices in the ticker DataFrames will rebalances occur?
-        # and, are they for the satellite only or the whole portfolio?
-        self.rb_indices, self.sat_only = self._calc_rebalance_info()
+        # on which dates do rebalances occur, and are they satellite-only?
+        self.rb_info = self._calc_rebalance_info(verbose)
 
         # save preference for handling dividend payouts
         self.reinvest_dividends = reinvest_dividends
@@ -113,30 +136,15 @@ class HistoricalSimulator(ABC):
         # (are properties, so an error is thrown if they go negative)
         # (go Decimal here?)
         self._cash = float(cash)
-        self._bench_cash = self._cash
-        self._starting_cash = self._cash
+        self._bench_cash = self.portfolio_value(self.start_date, at_close=False)
+        self._starting_value = self._bench_cash
 
         # save the core and satellite fractions
         self.sat_frac = np.round(Portfolio.sat_frac, 6)
         self.core_frac = np.round(1 - self.sat_frac, 6)
 
-        # make DataFrames to track main and benchmark portfolio values over time
-        self.strategy_results = pd.DataFrame({
-            'date': self.active_dates,
-            'value': np.zeros(len(self.active_dates))})
-        self.bench_results = self.strategy_results.copy()
-
-        # make DataFrames to track portfolios that are 100% core and 100% sat
-        if self.sat_frac > 0:
-            self.satellite_results = self.strategy_results.copy()
-        if self.core_frac > 0:
-            self.core_results = self.strategy_results.copy()
-
-        # make DataFrame to track free cash in main portfolio over time
-        self.cash_over_time = self.strategy_results.copy()
-
-        # track the current simulation date
-        self.today = self.open_date
+        # make DataFrames to track portfolios and cash over time
+        self._create_tracking_arrays()
 
         # save convenience lists of core, satellite, and benchmark asset names
         self.core_names = [key for key, info in self.assets.items()
@@ -188,7 +196,7 @@ class HistoricalSimulator(ABC):
         pass
 
     @abstractmethod
-    def on_new_day(self, ind_all, ind_active):
+    def on_new_day(self):
         '''
         Called in HistoricalSimulator.begin_time_loop().
 
@@ -197,105 +205,116 @@ class HistoricalSimulator(ABC):
         just be a simple `pass` statement (as in VolTargetStrategy()) if
         there's nothing that must be tracked daily.
 
-        Arguments
-        ---------
+        Returns
+        -------
 
-        ind_all : integer, required
-            The index of each ticker's historical DataFrame from which to get
-            the price data. It aligns with self.all_dates.
-
-        ind_active : integer, required
-            The index of self.active_dates that matches the simulation's current
-            date. ind_all = ind_active + self.burn_in.
+        Nothing.
         '''
         pass
 
     @abstractmethod
-    def rebalance_satellite(self, ind_all, ind_active, curr_rb_ind,
-                            verbose=False):
+    def refresh_parent(self):
+        '''
+        Called in HistoricalSimulator.append_date().
+
+        Re-creates any needed class attributes after a new date is appended to
+        asset dataFrames. Should only be called *before* any simulation is run.
+        If supporting appended dates isn't a concern, this method can just be a
+        simple `pass` statement.
+
+        Returns
+        -------
+
+        Nothing.
+        '''
+        pass
+
+    @abstractmethod
+    def rebalance_satellite(self, day, verbose=False):
         '''
         Called in HistoricalSimulator.rebalance_portfolio() or
         HistoricalSimulator.begin_time_loop().
 
         A satellite-only version of self._get_static_rb_changes() that
         re-weights the main portfolio's satellite assets according to an
-        individual Strategy's logic. Either returns a list of share changes on
-        total rebalaces or turns that list into an array that's passed to
-        self._make_rb_trades() on satellite-only rebalances. In either
-        case, the in-market asset's change in shares should be the first entry.
+        individual Strategy's logic.
 
         Arguments
         ---------
 
-        ind_all : integer, required
-            The index of each ticker's historical DataFrame from which to get
-            the price data. It aligns with self.all_dates.
-
-        ind_active : integer, required
-            The index of self.active_dates that matches the simulation's current
-            date. ind_all = ind_active + self.burn_in.
-
-        curr_rb_ind : integer, required
-            The index of self.rb_indices and self.sat_only.
-            self.sat_only[curr_rb_ind] is True on satellite-only rebalances and
-            False on total rebalances. self.rb_indices[curr_rb_ind] == ind_all.
+        day : `pandas.Timestamp` or `datetime.datetime`, required
+            The simulation's current date. Used to find whether this rebalance
+            is satellite-only or for the total portfolio.
 
         verbose : boolean, optional
             Controls whether or not to print any debugging information you
             choose to include in this method. [default: False]
+
+        Returns
+        -------
+
+        On total rebalances: A list of the satellite assets' share changes. If
+        there are no satellite assets, the list should be empty.
+
+        On satellite-only rebalances: Nothing, but the method should end with a
+        call to self.make_rb_trades().
+
+        ** In either case, the in-market asset's changes should come first in
+        the list/array of share changes. **
         '''
         pass
 
     # define HistoricalSimulator's own methods
-    def portfolio_value(self, ind_all=None,
-                        main_portfolio=True, rebalance=False):
+    def portfolio_value(self, date=None, main_portfolio=True, at_close=True):
         '''
-        Return the value of all assets currently held in the portfolio,
-        including cash.
+        Return the value of all assets currently held in the portfolio on a
+        certain date, including cash.
 
         Arguments
         ---------
 
-        ind_all : integer, required
-            The index of each ticker's historical DataFrame from which to get
-            the price data. It aligns with self.all_dates.
+        date : `pandas.Timestamp` or `datetime.datetime`, optional
+            The date whose price data is used in the value calculation. Will
+            cause an error if the date is not between the class' open and close
+            dates or if it is not a market day. [default: self.today]
 
         main_portfolio : boolean, optional
             If True, the method returns the value of main strategy's core/
             satellite portfolio. If False, the method returns the value of the
             benchmark portfolio. [default: True]
 
-        rebalance : boolean, optional
-            If True, asset prices use the current day's (self.today) closing
-            price. If False, assets are valuated using the current day's opening
-            price. [default: False]
+        at_close : boolean, optional
+            If True, asset prices use the given `date`'s closing price.
+            If False, assets are valuated using the current day's opening
+            price; use this option for rebalances. [default: True]
         '''
-        if not isinstance(rebalance, bool):
-            raise ValueError("'rebalance' must be a bool.")
+        if not isinstance(at_close, bool):
+            raise ValueError("'at_close' must be a bool.")
+
+        # ensure that the requested date is within the class instance's range
+        date = self.today if date is None else date
+        if not self.open_date <= date <= self.end_date:
+            raise ValueError("`date` must occur between `self.open_date` and "
+                             "`self.end_date`")
 
         # get remaining cash for the chosen portfolio
         cash = self.cash if main_portfolio else self.bench_cash
 
-        # if current sim hasn't reached the first trading date, return cash only
-        if self.today < self.start_date:
-            return cash
-
-        # IF ind_all == None do something else... but what???
-
         # determine whether to use open or close prices for assets
-        col = 'adjOpen' if rebalance else 'adjClose'
+        col = 'adjClose' if at_close else 'adjOpen'
 
         # collect labels for assets in the chosen portfolio
         labels = {'core', 'satellite'} if main_portfolio else {'benchmark'}
 
         # multiply shares held of each ticker by their current prices
-        holdings = np.sum([info['shares'] * info['df'][col][ind_all]
+        holdings = np.sum([info['shares'] * info['df'].loc[date, col]
                            for info in self.assets.values()
                            if info['label'] in labels])
 
         return cash + holdings
 
-    def call_tiingo(self, tick, open_date, end_date=datetime.now()):
+    def call_tiingo(self, tick, open_date,
+                    end_date=pd.to_datetime('now'), verbose=True):
         '''
         Called in self._build_assets_dict(), but can also be used independently.
 
@@ -308,20 +327,25 @@ class HistoricalSimulator(ABC):
         tick : str, required
             The ticker of the asset whose data will be downloaded.
 
-        open_date : `datetime.datetime`, required
+        open_date : `pandas.Timestamp` or `datetime.datetime`, required
             The earliest date of historical data to be downloaded. (Note that
             when this method is called upon initializing HistoricalSimulator,
             this argument is self.open_date, not self.start_date.)
 
-        end_date : `datetime.datetime`, optional
+        end_date : `pandas.Timestamp` or `datetime.datetime`, optional
             The final date of historical data to be downloaded. (When this
             method is called upon initializing HistoricalSimulator, this
-            argument is self.end_date.) [default: datetime.datetime.now()]
-        '''
-        open_date = open_date.strftime('%Y-%m-%d') # (e.g. '1998-07-11')
-        end_date = end_date.strftime('%Y-%m-%d')
-        print(f"{tick} from {open_date} to {end_date}...")
+            argument is self.end_date.) [default: pandas.to_datetime('now')]
 
+        verbose : boolean, optional
+            Whether or not to print the download's progress. [default: True]
+        '''
+        open_date = open_date.strftime('%Y-%m-%d') # (e.g. '1998-07-13')
+        end_date = end_date.strftime('%Y-%m-%d')
+        if verbose:
+            print(f"{tick} from {open_date} to {end_date}...")
+
+        url = f"https://api.tiingo.com/tiingo/daily/{tick}/prices"
         headers = {'Content-Type': 'application/json'}
         params = {
             'startDate': open_date,
@@ -331,13 +355,106 @@ class HistoricalSimulator(ABC):
             'token': MY_API_KEY,
         }
 
-        url = 'https://api.tiingo.com/tiingo/daily/' + tick + '/prices'
         resp = requests.get(url, params=params, headers=headers)
-        assert resp.status_code == 200, 'HTTP status code was not 200'
+        assert resp.status_code == 200, f"HTTP status code {resp.status_code}"
 
+        # convert JSON to dataFrame with index column made of Timestamp objects
         df = pd.DataFrame.from_dict(resp.json())
         df['date'] = pd.to_datetime(df['date'])
+        df = df.set_index('date').tz_localize(None) # use timezone-naive dates
+
         return df
+
+    def append_date(self, date, price_dict, verbose=False):
+        '''
+        A (somewhat hacky) way to add a new date's worth of price data to the
+        'df' attribute of each asset in `self.assets`. Must be run *before*
+        `self.begin_time_loop()`.
+
+        Useful for scenarios where you'd like to do a real life rebalance but
+        lack the current day's info since Tiingo only updates its data after
+        the market closes.
+
+        Arguments
+        ---------
+
+        date : `pandas.Timestamp` or `datetime.datetime`, required
+            The new date to add to the simulation. Must be a weekday and must
+            not be timezone-aware.
+
+        price_dict : dict, required
+            A dictionary whose keys are the string ticker symbols of each asset
+            in the current object (must match the keys in `self.assets`) and
+            whose values are floats representing the assets' prices on `date`.
+
+        verbose : boolean, optional
+            Whether to print rebalance month information. [default: False]
+        '''
+        # ensure the proposed date is valid
+        date = pd.Timestamp(date)
+        if date <= self.all_dates[-1]:
+            raise ValueError('Proposed date must come after all dates in the '
+                             'current `self.all_dates` array.')
+        elif date.isoweekday() >= 6:
+            raise ValueError('Proposed date must be a weekday.')
+
+        # ensure that a simulation hasn't already been run
+        if self.today != self.open_date:
+            raise IndexError('You may only run `append_date()`*before* running '
+                             'a simulation.')
+
+        # ensure that all assets are present in price_dict
+        if set(price_dict.keys()) != set(self.assets.keys()):
+            raise ValueError('Differing assets in proposed dict and '
+                             '`self.assets`. Please include all assets.')
+        elif len(price_dict.keys()) != len(self.assets.keys()):
+            raise ValueError('Differing number of assets in proposed dict and '
+                             '`self.assets`. Ensure that their lengths match.')
+
+        # add new row to each asset's dataFrame of price data
+        for tk, val in self.assets.items():
+            # create new row at the original dataFrame's end
+            val['df'].loc[date] = val['df'].iloc[-1]
+
+            # insert new price data into the new row
+            val['df'].loc[date, 'adjOpen'] = price_dict[tk]
+            val['df'].loc[date, 'adjClose'] = price_dict[tk]
+
+        # change class' end date
+        self.end_date = date
+
+        # include new date in the date arrays and the rebalance dataFrame
+        self.all_dates, self.active_dates = self._get_date_arrays()
+        self.rb_info = self._calc_rebalance_info(verbose)
+
+        # re-create result tracking arrays
+        self._create_tracking_arrays()
+
+        # finally, re-create any needed parent class attributes
+        self.refresh_parent()
+
+    def _create_tracking_arrays(self):
+        '''
+        Called in self.__init__() or (if run) self.append_date().
+
+        Creates arrays that track the main portfolio's value over time, as well
+        as the values of its core/satellite components (if present), the
+        benchmark portfoliio (if present), and of the portfolio's unspent cash.
+        '''
+        # make DataFrames to track main and benchmark portfolio values over time
+        self.strategy_results = pd.DataFrame({
+            'date': self.active_dates,
+            'value': np.zeros(len(self.active_dates))})
+        self.bench_results = self.strategy_results.copy()
+
+        # make DataFrames to track portfolios that are 100% core and 100% sat
+        if self.sat_frac > 0:
+            self.satellite_results = self.strategy_results.copy()
+        if self.core_frac > 0:
+            self.core_results = self.strategy_results.copy()
+
+        # make DataFrame to track free cash in main portfolio over time
+        self.cash_over_time = self.strategy_results.copy()
 
     def _verify_dates(self, tick_info):
         '''
@@ -355,19 +472,19 @@ class HistoricalSimulator(ABC):
         '''
         # are all assets active by self.start_date?
         for i, dt in enumerate(tick_info['startDate']):
-            dt = pd.to_datetime(dt)
+            dt = pd.Timestamp(dt)
             tk = tick_info.iloc[i]['ticker']
-            if dt > self.start_date:
+            if dt > self.open_date:
                 dt_str = dt.strftime('%Y-%m-%d')
-                sd_str = self.start_date.strftime('%Y-%m-%d')
-                raise ValueError(f"{tk}'s start date of {dt_str} is later "
-                                 f"than your chosen start date of {sd_str}. "
-                                 'Try an earlier start date or choose a '
-                                 'different ticker.')
+                od_str = self.open_date.strftime('%Y-%m-%d')
+                raise ValueError(f"{tk}'s start date of {dt_str} is later than "
+                                 "your open date (start date minus burn-in) "
+                                 f"of {od_str}. Try a later start date, a "
+                                 "decreased burn-in, or a different ticker.")
 
         # are all assets still active by self.end_date?
         for i, dt in enumerate(tick_info['endDate']):
-            dt = pd.to_datetime(dt)
+            dt = pd.Timestamp(dt)
             tk = tick_info.iloc[i]['ticker']
             if dt < self.end_date:
                 dt_str = dt.strftime('%Y-%m-%d')
@@ -377,7 +494,7 @@ class HistoricalSimulator(ABC):
                                  'Try an earlier end date or choose a '
                                  'different ticker.')
 
-    def _validate_assets_dict(self, Portfolio):
+    def _validate_assets_dict(self, Portfolio, verbose):
         '''
         Called in __init__() of HistoricalSimulator.
 
@@ -394,6 +511,9 @@ class HistoricalSimulator(ABC):
         Portfolio : `portfolio_maker.PortfolioMaker`, required
             The PortfolioMaker object provided when initializing this
             HistoricalSimulator instance.
+
+        verbose : boolean, required
+            Whether or not to print output from Portfolio.check_assets().
         '''
         # add a standard benchmark portfolio if one wasn't provided
         if len([tk for tk, info in Portfolio.assets.items()
@@ -404,19 +524,19 @@ class HistoricalSimulator(ABC):
             bench_stock = bench_bond = None
 
             # the stock index will be an ETF/mutual fund tracking the S&P 500
-            if (  self.open_date >= datetime(1993, 1, 29)
+            if (  self.open_date >= pd.Timestamp(1993, 1, 29)
                   and 'SPY' not in Portfolio.assets.keys()  ):
                 bench_stock = 'SPY'
-            elif (  self.open_date >= datetime(1976, 8, 31)
+            elif (  self.open_date >= pd.Timestamp(1976, 8, 31)
                     and 'VFINX' not in Portfolio.assets.keys()  ):
                 bench_stock = 'VFINX'
 
             # the bond index will be an ETF/mutual fund tracking the
             # Barclays US Aggregate Bonds Index
-            if (  self.open_date >= datetime(2003, 12, 31)
+            if (  self.open_date >= pd.Timestamp(2003, 12, 31)
                   and 'AGG' not in Portfolio.assets.keys()  ):
                 bench_bond = 'AGG'
-            elif (  self.open_date >= datetime(1986, 12, 31)
+            elif (  self.open_date >= pd.Timestamp(1986, 12, 31)
                     and 'VBMFX' not in Portfolio.assets.keys()  ):
                 bench_bond = 'VBMFX'
 
@@ -428,7 +548,7 @@ class HistoricalSimulator(ABC):
             # else, the benchmark portfolio remains empty
 
         # run Portfolio's own validation function to be thorough
-        Portfolio.check_assets()
+        Portfolio.check_assets(verbose)
 
         # verify that all assets are present over the user's entire date range
         self._verify_dates(Portfolio.tick_info)
@@ -439,17 +559,13 @@ class HistoricalSimulator(ABC):
 
         for tick, info in assets.items():
             # get daily open/close data from Tiingo
-            df = self.call_tiingo(tick, self.open_date, self.end_date)
+            df = self.call_tiingo(tick, self.open_date, self.end_date, verbose)
 
             # add the dataframe to the ticker's dictionary information
             info['df'] =  df
 
-            # initialize this asset with zero shares
-            # (go Decimal here?)
-            info['shares'] = 0
-
         # ensure that each asset has the same number of dates
-        num_dates = np.unique([len(assets[nm]['df']['date']) for nm in assets])
+        num_dates = np.unique([len(assets[nm]['df'].index) for nm in assets])
         assert len(num_dates) == 1, 'some ticker DataFrames are missing dates'
 
         return assets
@@ -467,62 +583,65 @@ class HistoricalSimulator(ABC):
         '''
         # pick a ticker (shouldn't matter which; all should have same dates)
         nm = list(self.assets.keys())[0]
+        df = self.assets[nm]['df']
 
-        # only consider dates in active period (i.e., remove burn-in dates)
-        all_dates = self.assets[nm]['df']['date'].values
+        # save one array with all dates and another from start_date onward
+        all_dates = df.index.copy()
+        active_dates = df.loc[self.start_date:].index.copy()
 
-        # save an array with only dates in active period (from start_date on)
-        active_dates = all_dates[self.burn_in:]
-        real_start = pd.to_datetime(active_dates[0])
+        # change start/end dates to match data if either is absent from the data
+        real_start = active_dates[0]
+        real_end = active_dates[-1]
+        fmt_str = '%Y-%m-%d'
 
-        # change start_date to match data if user-given start_date isn't in set
-        if (real_start.strftime('%Y-%m-%d')
-            != self.start_date.strftime('%Y-%m-%d')):
-            self.start_date = real_start.to_pydatetime()
+        if (real_start.strftime(fmt_str) != self.start_date.strftime(fmt_str)):
+            self.start_date = real_start
+        if (real_end.strftime(fmt_str) != self.end_date.strftime(fmt_str)):
+            self.end_date = real_end
 
         return all_dates, active_dates
 
-    def _append_or_assign(self, obj, ind, is_sat_only_rb=None):
+    def _modify_rb_vars(self, rb_dates, sat_only, day, is_sat_only_rb=False):
         '''
         Called in self._calc_rebalance_info().
 
-        self.rb_indices and self.sat_only can start out as lists or arrays. This
-        method handles that ambiguity by first trying to append `ind` to `obj`.
-        (This is the case where self.rb_indices and self.sat_only grow one item
-        at a time because self.sat_rb_freq == 365.25.)
+        `rb_dates` and `sat_only` can be two lists or a NoneType object and a
+        pandas Series, respectively. This method handles that ambiguity by first
+        trying to append `ind` to `obj` (i.e., the case where `rb_dates` and
+        `sat_only` grow one item at a time because self.sat_rb_freq == 365.25.).
 
-        If append() is not an attribute of `obj`, the method reverts to flipping
-        the value of index `ind` in `obj`, since `obj` must be an array instead.
-        (This is the case where self.rb_indices and self.sat_only are pre-filled
-        and the latter has indices that need to be changed from True to False.)
+        If append() causes an AttributeError, the method pivots to flipping
+        `sat_only`'s value at date `day`, since it must be a Series instead.
+        (This is the case it is pre-filled with Trues and flips one to False.)
 
-        See self._calc_rebalance_info() for more information on how
-        self.rb_indices and self.sat_only are built.
+        See self._calc_rebalance_info() for more on how self.rb_info is built.
 
         Arguments
         ---------
 
-        obj : list or `numpy.ndarray`, required
-            Is either self.rb_indices or self.sat_only. Its type depends on
-            this instance's satellite rebalance frequency.
+        rb_dates : list or None, required
+        sat_only : list or `pandas.Series`, required
+            Types depend on this class instance's satellite rebalance frequency.
 
-        ind : integer, required
-            The index of `obj` that will be appended or flipped.
+        day : `pandas.Timestamp` or `datetime.datetime`, required
+            The date to be appended to `rb_dates`/`sat_only` or flipped in
+            `sat_only`, depending on those arguments' types.
 
         is_sat_only_rb: boolean, optional
-            The type of rebalance that will happen on the date that corresponds
-            with `ind` in each asset's historical DataFrame. If True, it's a
-            satellite-only rebalance; if False, it's for the total portfolio.
-            Only use this argument when `obj` == self.sat_only. [default: None]
+            The type of rebalance that will happen on date `day` in each asset's
+            historical DataFrame. If True, it's a satellite-only rebalance;
+            if False, it's for the total portfolio. [default: False]
         '''
-        obj_is_sat_only = is_sat_only_rb is not None
-        try:
-            obj.append(ind if not obj_is_sat_only else is_sat_only_rb)
-        except AttributeError:
-            if which: # if sat_only (no changes to array version of rb_indices)
-                obj[ind] = is_sat_only_rb
+        # need to check if day is None (final month scenario)
+        if day is not None:
+            try:
+                rb_dates.append(day)
+                sat_only.append(is_sat_only_rb)
+            except AttributeError:
+                sat_only.loc[day] = is_sat_only_rb
+                # (no change needed with rb_dates)
 
-        return obj
+        return rb_dates, sat_only
 
     def _last_day_of_month(self, year, month):
         '''
@@ -539,25 +658,87 @@ class HistoricalSimulator(ABC):
         month : integer, required
             The month for the date in question.
         '''
-        next_month = datetime(year, month, 28) + timedelta(days=4)
-        return (next_month - timedelta(days=next_month.day)).isoformat()
+        next_month = pd.Timestamp(year, month, 28) + timedelta(days=4)
+        return next_month - timedelta(days=next_month.day)
 
-    def _calc_rebalance_info(self):
+    def _get_mth_rb_range(self, yr, mth):
+        '''
+        Called in self._calc_rebalance_info().
+
+        Returns the first and last days of a range of valid, weekday-only
+        rebalance dates for a particular year/month. Based on user's preference
+        for days after the first of a month (or days before the last market day
+        of the month) to rebalance.
+
+        The size of the range depends on the buffer used; if the buffer is 0,
+        the first and last days will be the same. However, use of a buffer is
+        advised since the desired date might fall on a holiday in a given month.
+
+        Arguments
+        ---------
+
+        yr : integer, required
+            The year to consider in calculating rebalance dates.
+
+        mth: integer, required (from 1 to 12)
+            The month to consider in calculating rebalance dates.
+        '''
+        # SHOULD buffer BE AN ARGUMENT?
+
+        # assign target rb date index, reference date, and iteration direction
+        # based on whether rb date is counted from the month's beginning or end
+        if self._target_rb_day < 0:
+            rb_day = -self._target_rb_day - 1
+            ref_day = self._last_day_of_month(yr, mth)
+            iter_day = -1
+        else:
+            rb_day = self._target_rb_day
+            ref_day = pd.Timestamp(yr, mth, 1)
+            iter_day = 1
+
+        # create object to hold beginning/end dates of range
+        date_range = [] # for short lists, min(list) is faster than array.min()
+
+        # set number for market days to capture in range beyond exact rb date
+        buffer = 2
+
+        # set initial loop date and counter days before/after ref_day
+        dt = ref_day
+        days_beyond_ref = 0
+
+        while True:
+            # only count weekdays as possible options
+            if dt.isoweekday() < 6:
+                if days_beyond_ref == rb_day:
+                    date_range.append(dt)
+                elif days_beyond_ref == rb_day + buffer:
+                    date_range.append(dt)
+                    break
+                # iterate the loop's "days beyond rb_day" counter
+                days_beyond_ref += 1
+
+            # iterate the loop's date
+            dt += timedelta(days=iter_day)
+
+        return date_range
+
+    def _calc_rebalance_info(self, verbose):
         '''
         Called in __init__() of HistoricalSimulator.
 
-        Uses satellite and total portfolio rebalance frequencies to get
-        self.rb_indices, an array of the indices of each asset's DataFrame that
-        will trigger rebalance events.
+        Uses satellite and total portfolio rebalance frequencies to create
+        `self.rb_info`, a dataFrame of this instance's rebalance dates and their
+        types (satellite-only if True, total portfolio if False).
 
-        Returns that along with self.sat_only, an associated, same-size array
-        that is True when the rebalance is for the satellite portion only and
-        False when it's time for a full portfolio rebalance.
+        Arguments
+        ---------
 
-        Non-daily frequencies will rebalance on the penultimate market day of a
-        qualifying month to try and avoid whipsawing from larger investors doing
-        their own rebalancing on the last or first market day of the month.
+        verbose : boolean, required
+            Whether or not to print rebalance month information.
         '''
+        my_pr = lambda *args, **kwargs: (print(*args, **kwargs)
+                                         if verbose else None)
+
         # calculate the months in which to perform each type of rebalance
         all_months = np.arange(1, 13)
 
@@ -575,35 +756,37 @@ class HistoricalSimulator(ABC):
 
             # give total rebalances priority over satellite-only
             sat_mths = sat_mths[~np.in1d(sat_mths, tot_mths)]
-            print('sat', sat_mths, '\ntot', tot_mths)
+            my_pr('sat rb mths:', sat_mths, '\ntot rb mths:', tot_mths)
 
-            # create list of indices of active_dates where rebalances occur
-            # and another specifying which type (satellite or total?)
-            rb_indices = []
+            # create list of dates when rebalances occur...
+            # and another specifying which type -- satellite or total
+            rb_dates = []
             sat_only = []
 
         else: # if daily... (only. in future could do every 2, 3 days and so on)
             # ...then every month has rebalance events
             sat_mths = all_months
-            print('sat', sat_mths, '\ntot', tot_mths)
+            my_pr('sat rb mths:', sat_mths, '\ntot rb mths:', tot_mths)
 
             # include every active_date as a possible rebalance date
             # (total rebalance days will be flipped to True in sat_only later)
-            rb_indices = np.arange(len(self.active_dates))
-            sat_only = np.ones(len(self.active_dates)).astype(bool)
+            rb_dates = None
+            sat_only = pd.Series(index=self.active_dates,
+                                 data=np.ones(len(self.active_dates),
+                                              dtype=bool))
 
         #go = time.time()
+        my_pr('all sim mths:')
         yr = self.start_date.year
         while yr <= self.end_date.year:
             # make array with all eligible months
             months = np.arange(1 if yr != self.start_date.year
                                else self.start_date.month,
                                13 if yr != self.end_date.year
-                               else self.end_date.month)
-            # don't add 1 to end_month in last year -- we don't want it
-            # included because data may not get to its penultimate market day
+                               else self.end_date.month + 1)
+            # end month may not reach a reblance date, but allow for it if so
 
-            print(months, yr)
+            my_pr(months, yr)
             # limit months to those cleared for rebalance events
             eligible = [mth for mth in months
                         if mth in tot_mths or mth in sat_mths]
@@ -611,31 +794,50 @@ class HistoricalSimulator(ABC):
             # check every month in the current year...
             for mth in eligible:
                 # automatically make start_date a total rebalance event
-                if (mth == self.start_date.month
-                    and yr == self.start_date.year):
-                    rb_indices = self._append_or_assign(rb_indices, 0)
-                    sat_only = self._append_or_assign(sat_only, 0,
+                if (yr == self.start_date.year
+                    and mth == self.start_date.month):
+                    (rb_dates,
+                     sat_only) = self._modify_rb_vars(rb_dates, sat_only,
+                                                      self.start_date,
                                                       is_sat_only_rb=False)
-                # in subsequent months, get month's penultimate market day
+                # in subsequent months, find desired market day for rebalancing
                 else:
-                    last_day = np.datetime64(self._last_day_of_month(yr, mth))
-                    penult = np.where(self.active_dates < last_day)[0][-1]
-                    rb_indices = self._append_or_assign(rb_indices, penult)
-                    # note type of rebalance that takes place this month
+                    # get first and last possible rebalance days (using a range
+                    # instead of a specific day for protection against holidays)
+                    fnl = self._get_mth_rb_range(yr, mth)
+
+                    # save dates that fall within that range
+                    poss = self.active_dates[(min(fnl) <= self.active_dates)
+                                             & (self.active_dates <= max(fnl))]
+
+                    # save last/first day in the range as this month's rb date
+                    try:
+                        day = poss[-1 if self._target_rb_day < 0 else 0]
+                    # if there are no dates in that range, use None instead
+                    # (i.e., active_dates' last month cuts off prior to rb date)
+                    except IndexError:
+                        day = None
+                        # NOTE: depending on buffer size in _get_mth_rb_range(),
+                        # rb's could be triggered if sim ends within buffer but
+                        # before target date. not yet sure how to fix this...
+
+                    # update class' rb objects with this month's info
                     kind = True if mth not in tot_mths else False
-                    sat_only = self._append_or_assign(sat_only, penult,
+                    (rb_dates,
+                     sat_only) = self._modify_rb_vars(rb_dates, sat_only, day,
                                                       is_sat_only_rb=kind)
 
             yr += 1
-        #print(f"{time.time() - go:.3f} s for rebalance info loop")
+        #my_pr(f"{time.time() - go:.3f} s for rebalance info loop")
 
-        # make arrays and shift rb_indices to account for burn-in days
-        rb_indices = np.array(rb_indices) + self.burn_in
-        sat_only = np.array(sat_only)
+        # make dataFrame of rebalance info with index of active dates
+        rb_info = pd.DataFrame({'sat_only': sat_only})
+        if type(rb_info.index) != pd.DatetimeIndex:
+            rb_info.set_index(pd.DatetimeIndex(rb_dates), inplace=True)
 
-        return rb_indices, sat_only
+        return rb_info
 
-    def _get_static_rb_changes(self, names, ind_all, main_portfolio=True):
+    def _get_static_rb_changes(self, names, main_portfolio=True):
         '''
         Called in self.rebalance_portfolio().
 
@@ -650,26 +852,22 @@ class HistoricalSimulator(ABC):
             A list of assets who share the same label; it should typically
             either be self.core_names or self.bench_names.
 
-        ind_all : integer, required
-            The integer index of each ticker's historical DataFrame from which
-            to get the price data. It aligns with self.all_dates.
-
         main_portfolio : boolean, optional
             If True, the method finds share changes for the main strategy's
             core/satellite portfolio. If False, the method finds share changes
             for the benchmark portfolio. [default: True]
         '''
         # get total value for portfolio in question
-        pf_value = self.portfolio_value(ind_all, main_portfolio=main_portfolio,
-                                        rebalance=True)
+        pf_val = self.portfolio_value(self.today, main_portfolio=main_portfolio,
+                                      at_close=False)
 
         # get share changes for assets in `names`
         deltas = []
         for name in names:
             ideal_frac = self.assets[name]['fraction']
-            ideal_holdings = pf_value * ideal_frac
+            ideal_holdings = pf_val * ideal_frac
 
-            curr_price = self.assets[name]['df']['adjOpen'][ind_all]
+            curr_price = self.assets[name]['df'].loc[self.today, 'adjOpen']
             curr_held = self.assets[name]['shares'] * curr_price
 
             delta_shares = (ideal_holdings - curr_held) // curr_price
@@ -677,8 +875,7 @@ class HistoricalSimulator(ABC):
 
         return deltas
 
-    def _make_rb_trades(self, names, deltas, ind_all, main_portfolio=True,
-                        verbose=False):
+    def make_rb_trades(self, names, deltas, main_portfolio=True, verbose=False):
         '''
         Called in self.rebalance_portfolio() or the child Strategy class'
         rebalance_satellite().
@@ -700,10 +897,6 @@ class HistoricalSimulator(ABC):
         deltas : `numpy.ndarray`, required
             The corresponding share changes for the assets in `names`.
 
-        ind_all : integer, required
-            The index of each ticker's historical DataFrame from which to get
-            the price data. It aligns with self.all_dates.
-
         main_portfolio : boolean, optional
             If True, rebalances the main strategy's core/satellite portfolio.
             If False, rebalances the benchmark portfolio. [default: True]
@@ -724,7 +917,7 @@ class HistoricalSimulator(ABC):
         to_buy = np.where(deltas > 0)[0] # no action needed when deltas == 0
 
         # gather assets' current prices in an array that matches with deltas
-        prices = np.array([self.assets[nm]['df']['adjOpen'][ind_all]
+        prices = np.array([self.assets[nm]['df'].loc[self.today, 'adjOpen']
                            for nm in names])
 
         # first, sell symbols that are currently overweighted in portfolio
@@ -751,12 +944,11 @@ class HistoricalSimulator(ABC):
                 self.bench_cash -= prices[to_buy[i]] * share_change
             self.assets[nm]['shares'] += share_change
 
-    def rebalance_portfolio(self, ind_all, ind_active, curr_rb_ind,
-                            verbose=False):
+    def rebalance_portfolio(self, day, verbose=False):
         '''
         Called in self.begin_time_loop().
 
-        General method that performs a whole-portfolio rebalance by
+        General method that performs a total-portfolio rebalance by
         re-weighting core assets in-method and gets needed changes for
         satellite assets from child's rebalance_satellite(). Then, completes the
         transactions needed to restore balance.
@@ -772,53 +964,42 @@ class HistoricalSimulator(ABC):
         Arguments
         ---------
 
-        ind_all : integer, required
-            The index of each ticker's historical DataFrame from which to get
-            the price data. It aligns with self.all_dates.
-
-        ind_active : integer, required
-            The index of self.active_dates that matches the simulation's current
-            date. ind_all = ind_active + self.burn_in.
-
-        curr_rb_ind : integer, required
-            The index of self.rb_indices and self.sat_only.
-            self.sat_only[curr_rb_ind] is True on satellite-only rebalances and
-            False on total rebalances. self.rb_indices[curr_rb_ind] == ind_all.
+        day : `pandas.Timestamp` or `datetime.datetime`, required
+            The simulation's current date. Used to find whether this rebalance
+            is satellite-only or for the total portfolio.
 
         verbose : boolean, optional
-            If True, the method prints information on completed trades.
+            If True, the method prints information on completed transactions.
             [default: False]
         '''
         my_pr = lambda *args, **kwargs: (print(*args, **kwargs)
                                          if verbose else None)
 
-        my_pr(f"it's a total; sat_only is {self.sat_only[curr_rb_ind]}; "
+        my_pr(f"total rb; sat_only is {self.rb_info.loc[day, 'sat_only']}; "
               f"${self.cash:.2f} in account")
 
         # get share changes for core assets
-        deltas = self._get_static_rb_changes(self.core_names, ind_all)
+        deltas = self._get_static_rb_changes(self.core_names)
 
         # get share changes for satellite assets from child's method
-        deltas.extend(self.rebalance_satellite(ind_all, ind_active,
-                                               curr_rb_ind, verbose=verbose))
+        deltas.extend(self.rebalance_satellite(day, verbose=verbose))
         deltas = np.array(deltas)
         my_pr('deltas:', deltas)
 
         # rebalance the main (core/satellite) strategy's portfolio
         main_names = np.array(self.core_names + self.sat_names)
-        self._make_rb_trades(main_names, deltas, ind_all, verbose=verbose)
+        self.make_rb_trades(main_names, deltas, verbose=verbose)
 
         # next, get share changes for benchmark assets
-        bench_deltas = self._get_static_rb_changes(self.bench_names, ind_all,
+        bench_deltas = self._get_static_rb_changes(self.bench_names,
                                                    main_portfolio=False)
         bench_deltas = np.array(bench_deltas)
 
-        # rebalance the benchmark portfolio
+        # rebalance the benchmark portfolio (no printed output for now)
         bench_names = np.array(self.bench_names)
-        self._make_rb_trades(bench_names, bench_deltas, ind_all,
-                             main_portfolio=False) # no printed output for now
+        self.make_rb_trades(bench_names, bench_deltas, main_portfolio=False)
 
-    def _check_dividends(self, ind_all, main_portfolio=True, verbose=False):
+    def _check_dividends(self, main_portfolio=True, verbose=False):
         '''
         Called in self.begin_time_loop().
 
@@ -831,15 +1012,11 @@ class HistoricalSimulator(ABC):
         (the "ex-date") in order to claim the payment.
 
         (Technically, you need to have owned the asset two business days before
-        the dividend payment date, but this only matters for satellite assets
-        that are rebalanced daily. I likely won't go to this level of specificity.)
+        the dividend payment date, but this only matters for assets that are
+        rebalanced daily. I likely won't go to this level of specificity.)
 
         Arguments
         ---------
-
-        ind_all : integer, required
-            The index of each ticker's historical DataFrame from which to get
-            the price data. It aligns with self.all_dates.
 
         main_portfolio : boolean, optional
             If True, rebalances the main strategy's core/satellite portfolio.
@@ -859,7 +1036,7 @@ class HistoricalSimulator(ABC):
         # check each asset for a dividend payment on the indicated day
         for tk in tickers:
             # if there's none, skip to the next ticker
-            div_cash = self.assets[tk]['df'].loc[ind_all, 'divCash']
+            div_cash = self.assets[tk]['df'].loc[self.today, 'divCash']
             if div_cash == 0:
                 continue
 
@@ -870,7 +1047,7 @@ class HistoricalSimulator(ABC):
 
             # barring those, receive the dividend as partial shares or cash
             if self.reinvest_dividends:
-                tk_price = self.assets[tk]['df'].loc[ind_all, 'adjOpen']
+                tk_price = self.assets[tk]['df'].loc[self.today, 'adjOpen']
                 partials = shares_held * (div_cash / tk_price)
                 my_pr(f"**** on {self.today.strftime('%Y-%m-%d')}\n"
                       f"received a ${div_cash:.2f} dividend from {tk} @$"
@@ -895,7 +1072,7 @@ class HistoricalSimulator(ABC):
         prices and tracks stats based on closing prices.
 
         MIGHT BE NICE TO BE ABLE TO PROVIDE A START DATE AND END DATE, CALCULATE REBALANCES BASED ON THOSE, THEN RUN THE SIMULATION OVER THAT SUBSET.
-        WOULD HAVE TO RE-RUN _calc_rebalance_info() IN HERE AND REMAKE self.rb_indices AND self.sat_only.
+        WOULD HAVE TO RE-RUN _calc_rebalance_info() IN HERE AND REMAKE self.rb_info.
 
         Arguments
         ---------
@@ -913,22 +1090,21 @@ class HistoricalSimulator(ABC):
         to_cash_over_time = []
 
         # run the simulation
-        curr_rb_ind = 0
         go = time.time()
-        for i, today in enumerate(self.all_dates):
-            self.today = pd.to_datetime(today)
+        for today in self.all_dates:
+            self.today = today
             # "PRE-OPEN": update daily indicators based on YESTERDAY's CLOSES
-            if i >= self.burn_in:
-                self.on_new_day(i, i - self.burn_in)
+            if self.today >= self.start_date:
+                self.on_new_day()
 
             # "PRE-OPEN": cash in dividends from ex-date (YESTERDAY's) holdings,
             # once for main portfolio and once for benchmark
-            if i >= self.burn_in:
-                self._check_dividends(i, verbose=verbose)
-                self._check_dividends(i, main_portfolio=False, verbose=False)
+            if self.today >= self.start_date:
+                self._check_dividends(verbose=verbose)
+                self._check_dividends(main_portfolio=False, verbose=False)
 
             # AT OPEN: rebalance if needed
-            if i == self.rb_indices[curr_rb_ind]:
+            if self.today in self.rb_info.index: # 2x faster than check by index
                 # make rebalance calculations based on YESTERDAY'S STATS,
                 # which come at index [i - burn_in] of smas, stds, etc.
 
@@ -940,27 +1116,20 @@ class HistoricalSimulator(ABC):
                 except AttributeError:
                     my_pr('**** on', self.today.strftime('%Y-%m-%d'))
 
-                if self.sat_only[curr_rb_ind] == True:
-                    # rebalance satellite portion
-                    self.rebalance_satellite(i, i - self.burn_in, curr_rb_ind,
-                                             verbose=verbose)
-                else:
-                    # rebalance total portfolio
-                    self.rebalance_portfolio(i, i - self.burn_in, curr_rb_ind,
-                                             verbose=verbose)
-
-                if curr_rb_ind < len(self.rb_indices) - 1:
-                    curr_rb_ind += 1
+                if self.rb_info.loc[self.today, 'sat_only'] == True: # sat-only
+                    self.rebalance_satellite(self.today, verbose=verbose)
+                else: # total portfolio
+                    self.rebalance_portfolio(self.today, verbose=verbose)
 
             # AT CLOSE: track stats
-            if i >= self.burn_in:
-                # save the main core/satellite portfolio's value at day's close
-                pf_value = self.portfolio_value(i, rebalance=False)
+            if self.today >= self.start_date:
+                # save the main, core/satellite portfolio's value at day's close
+                pf_value = self.portfolio_value(at_close=False)
                 to_strategy_results.append(pf_value)
 
                 # save the benchmark portfolio's value at day's close
-                bench_pf_value = self.portfolio_value(i, main_portfolio=False,
-                                                      rebalance=False)
+                bench_pf_value = self.portfolio_value(main_portfolio=False,
+                                                      at_close=False)
                 to_bench_results.append(bench_pf_value)
 
                 # save amount of free cash left in the main portfolio
@@ -1069,9 +1238,8 @@ class HistoricalSimulator(ABC):
         # https://www.color-hex.com/color/d4bd8a, darker shade
 
         # print info on main final portfolio holdings and overall values
-        final = len(self.all_dates) - 1 # the last index of the value array
         my_pr('end date main portfolio value: '
-              f"${self.portfolio_value(final):,.02f}")
+              f"${self.portfolio_value(self.end_date):,.02f}")
 
         my_pr('end date main portfolio shares: ')
         strategy_assets = ([f"{key}: {info['shares']:.1f}"
@@ -1090,7 +1258,7 @@ class HistoricalSimulator(ABC):
             # https://www.color-hex.com/color/b7e4cf, darker shade
 
             my_pr('end date benchmark portfolio value: '
-                  f"${self.portfolio_value(final, main_portfolio=False):,.02f}")
+                  f"${self.portfolio_value(self.end_date, main_portfolio=False):,.02f}")
 
             my_pr('end date benchmark portfolio shares: ')
             bench_assets = ([f"{key}: {info['shares']:.1f}"
@@ -1099,7 +1267,7 @@ class HistoricalSimulator(ABC):
             my_pr(', '.join(bench_assets))
 
         # plot a line showing the starting amount of cash
-        ax.axhline(self._starting_cash, linestyle='--', c='k', alpha=.5)
+        ax.axhline(self._starting_value, linestyle='--', c='k', alpha=.5)
 
         # if logarithmic, ensure the axes are properly populated
         if logy:
@@ -1170,7 +1338,7 @@ class HistoricalSimulator(ABC):
             if tk not in self.assets.keys():
                 raise ValueError(f"{tk} is not part of your list of assets.")
         if start_value is None:
-            start_value = self._starting_cash
+            start_value = self._starting_value
         if reinvest_dividends:
             raise NotImplementedError('Coming soon...')
 
@@ -1190,12 +1358,10 @@ class HistoricalSimulator(ABC):
         results = []
         for i, tk in enumerate(tickers):
             # adjust ticker's historical prices so first day is at start_value
-            tick_info = self.assets[tk]['df'].loc[:, ['date','adjClose']].copy()
-            tick_info = tick_info.loc[self.burn_in:]
-            tick_info.index = pd.RangeIndex(len(tick_info.index))
-            tick_info.loc[:, 'adjClose'] /= tick_info.loc[0, 'adjClose']
-            tick_info.loc[:, 'adjClose'] *= start_value
-            results.append(tick_info.loc[:, 'adjClose'])
+            tick_info = self.assets[tk]['df'].loc[self.start_date:,
+                                                  'adjClose'].copy()
+            tick_info *= start_value / tick_info.iloc[0]
+            results.append(tick_info.values)
 
             # find out what type of asset this ticker is and assign color
             tick_type = self.assets[tk]['label']
@@ -1209,14 +1375,12 @@ class HistoricalSimulator(ABC):
                 raise ValueError(f"invalid 'label' for ticker {tk}")
 
             # add this ticker's data to the plot
-            tick_info.plot('date', 'adjClose',
-                           label=f"{tk} ({tick_type})",
+            tick_info.plot(label=f"{tk} ({tick_type})",
                            lw=1.5, c=col,
                            fontsize=14, logy=logy, ax=ax)
 
             # print final value of ticker holdings
-            my_pr(f"{tk} ending value: "
-                  f"${tick_info.iloc[-1]['adjClose']:,.2f}")
+            my_pr(f"{tk} ending value: ${tick_info[-1]:,.2f}")
 
         # plot a line showing the starting investment value
         ax.axhline(start_value, linestyle='--', c='k', alpha=.5)

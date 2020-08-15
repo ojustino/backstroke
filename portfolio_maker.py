@@ -258,6 +258,29 @@ class PortfolioMaker:
 
         return ticker
 
+    def _validate_shares(self, shares, label):
+        '''
+        Ensures the proposed shares value is valid.
+
+        Arguments
+        ---------
+
+        shares: float, required
+            The initial number of shares of a proposed asset.
+
+        label : str, required
+            The asset's type -- core, satellite, or benchmark. Benchmark assets
+            can't have an initial share count other than 0.
+        '''
+        if shares < 0:
+            raise ValueError('Only positive `shares` values are allowed.')
+        elif label == 'benchmark' and shares != 0:
+            raise ValueError("Only assets with a `label` of 'core' or "
+                             "'satellite' can be initialized with a nonzero "
+                             "number of shares.")
+
+        return shares
+
     def _get_label_weights(self, label):
         '''
         Returns an array of weights for assets in the portfolio with a certain
@@ -285,7 +308,7 @@ class PortfolioMaker:
         '''
         return [tk for tk, val in self.assets.items() if val['label'] == label]
 
-    def _get_check_printout(self, label):
+    def _get_check_printout(self, label, verbose):
         '''
         Used in self.check_assets().
 
@@ -300,37 +323,43 @@ class PortfolioMaker:
 
         label : str, required
             The assets' type -- core, satellite, or benchmark.
+
+        verbose : boolean, required
+            Whether or not to print debugging information.
         '''
-        print(f"{label} assets and target holding fraction(s):")
+        my_pr = lambda *args, **kwargs: (print(*args, **kwargs)
+                                         if verbose else None)
+
+        my_pr(f"{label} assets and target holding fraction(s):")
         ticks = self._get_label_tickers(label)
 
         if label != 'satellite':
             if len(ticks) > 0:
                 fracs = self._get_label_weights(label)
                 for i, fr in enumerate(fracs):
-                    print(f"{fr*100:.5f}% in {ticks[i]}")
+                    my_pr(f"{fr*100:.5f}% in {ticks[i]}")
 
                 label_count = fracs.sum()
-                print(f"*** {label_count*100:.5f}% in {label} overall ***")
+                my_pr(f"*** {label_count*100:.5f}% in {label} overall ***")
             else:
                 label_count = 0
-                print('None.')
+                my_pr('None.')
         else:
             if len(ticks) > 0:
                 for tk in ticks:
                     in_mkt = self.assets[tk]['in_mkt']
-                    print(f"{'in' if in_mkt else 'out-of'}-market asset: "
+                    my_pr(f"{'in' if in_mkt else 'out-of'}-market asset: "
                           f"{'    ' if in_mkt else ''}{tk}")
             else:
-                print('None.')
+                my_pr('None.')
             label_count = len(ticks)
-            print(f"*** {self.sat_frac*100:.5f}% in {label} overall ***")
+            my_pr(f"*** {self.sat_frac*100:.5f}% in {label} overall ***")
 
-        print('----------------')
+        my_pr('----------------')
         return label_count
 
-    def add_ticker(self, ticker, fraction=None, label=None, in_market=None,
-                   **kwargs):
+    def add_ticker(self, ticker, fraction=None, in_market=None, label=None,
+                   shares=0, **kwargs):
         '''
         Create a new entry in self.assets for the given ticker. Adds a row of
         information about the result to self.tick_info. Please read "Arguments."
@@ -342,6 +371,8 @@ class PortfolioMaker:
             The symbol of your desired asset.
 
         fraction : float, explained below.
+
+        in_market : boolean, explained below.
 
         label : str, required
             The asset's type -- core, satellite, or benchmark. Choices for the
@@ -363,7 +394,11 @@ class PortfolioMaker:
                 will always be entered as-is since `sat_frac` has no effect on
                 benchmark assets.
 
-        in_market : boolean, explained above.
+        shares : float, optional
+            The number of shares of this ticker that are held at the start of
+            the eventual simulation. Only valid for assets with 'core' or
+            'satellite' label. Useful for calculating rebalances for accounts
+            that already exist. [default: 0]
 
         **kwargs : str, optional
             You may also add custom keys, perhaps to help with custom Strategy
@@ -371,22 +406,25 @@ class PortfolioMaker:
         '''
         ticker = self._validate_ticker(ticker)
 
-        # create dict entry for this asset and add its label
+        # create dict entry for this asset and save its label
         tick = {}
         label = self._validate_label(label, in_market)
         tick['label'] = label
 
         # add fraction or in_market to dict entry (depending on label)
-        # (no else: Error condition needed because label was validated above)
-        if label == 'core':
-            fraction = self._validate_fraction(fraction)
-            tick['fraction'] = (fraction if not self.relative_core_frac
-                                else np.round(fraction * (1-self.sat_frac), 6))
-        elif label == 'benchmark':
-            self._validate_fraction(fraction)
-            tick['fraction'] = fraction
-        elif label == 'satellite':
+        # (no "else: Error" condition needed because label was validated above)
+        if label == 'satellite':
             tick['in_mkt'] = in_market
+        else: # 'core' or 'benchmark'
+            fraction = self._validate_fraction(fraction)
+            tick['fraction'] = (fraction if label == 'benchmark'
+                                or not self.relative_core_frac
+                                else np.round(fraction * (1-self.sat_frac), 6))
+
+        # for core or satellite assets, save initial share count to dict entry
+        # go with Decimal here instead of float???
+        shares = self._validate_shares(shares, label)
+        tick['shares'] = shares
 
         # if any, add kwargs to dict entry
         for key, val in kwargs.items():
@@ -464,7 +502,7 @@ class PortfolioMaker:
         self.assets = {}
         self.tick_info = pd.DataFrame([])
 
-    def check_assets(self):
+    def check_assets(self, verbose=True):
         '''
         Used in __init__() of HistoricalSimulator and can also be used
         independently.
@@ -472,9 +510,18 @@ class PortfolioMaker:
         Checks fractions allocated to all tickers in self.assets, first for the
         main core/satellite portfolio and then for the benchmark portfolio. If
         all tests pass, self.assets is ready for use in a historical simulation.
+
+        Arguments
+        ---------
+
+        verbose : boolean, optional
+            Whether or not to print debugging information. [default: True]
         '''
-        core_frac = self._get_check_printout('core')
-        num_sat = self._get_check_printout('satellite')
+        my_pr = lambda *args, **kwargs: (print(*args, **kwargs)
+                                         if verbose else None)
+
+        core_frac = self._get_check_printout('core', verbose)
+        num_sat = self._get_check_printout('satellite', verbose)
 
         if np.round(core_frac + self.sat_frac, 5) != 1:
             raise ValueError('Make sure core and satellite fractions add up '
@@ -500,9 +547,9 @@ class PortfolioMaker:
                 warnings.warn('Two satellite assets have been chosen, but '
                               f"`sat_frac` is 0%. Is that intentional?")
 
-        print('-----passed-----')
-        print('----------------')
-        bench_frac = self._get_check_printout('benchmark')
+        my_pr('-----passed-----')
+        my_pr('----------------')
+        bench_frac = self._get_check_printout('benchmark', verbose)
         bench_ticks = self._get_label_tickers('benchmark')
 
         if not (   (bench_frac == 0 and len(bench_ticks) == 0)
@@ -511,4 +558,4 @@ class PortfolioMaker:
                              'fractions add up to 1 (100%) before running '
                              'simulations.')
 
-        print('-----passed-----\n')
+        my_pr('-----passed-----\n')
