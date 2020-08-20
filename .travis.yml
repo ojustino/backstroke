@@ -1,0 +1,32 @@
+if: (type = push AND branch = master) OR (type = pull_request)
+# python isn't supported with macOS option, so choose a different language
+# (it doesn't end up mattering since the script will carry out needed installs)
+language: c
+os:
+  - linux
+  #- osx
+  #- windows
+dist: bionic # ubuntu 18.04; only applies to linux
+env:
+  global:
+    - MAIN_CMD='pip install -r binder/requirements.txt' # -vvv'
+    #- MAIN_CMD='python setup.py install' # after packaging is complete
+    # FINISH TESTS!
+    - TEST_CMD='pytest' #-s' # increases pytest's verbosity
+    #- POST_LNX_CMD='python binder/postBuild'
+    #- PRE_MAC_CMD='sh binder/travis_mac_installs.sh'
+    #- PRE_CMD='bash binder/travis_installs.sh'
+  matrix:
+    - PYTHON_VERSION=3.6.8
+    #- PYTHON_VERSION=3.7.3
+    - PYTHON_VERSION=3.8.3
+install:
+  # first two lines needed for ci-helpers to work
+  - git clone --depth 1 git://github.com/astropy/ci-helpers.git
+  - source ci-helpers/travis/setup_conda.sh
+script:
+  # can then use *_CMD environment variables for package installs and tests
+  - $MAIN_CMD
+  #- if [ $TRAVIS_OS_NAME == linux ]; then $POST_LNX_CMD; fi
+  # brew installs live in in /usr/local/bin; browser executable in /Applications
+  - $TEST_CMD

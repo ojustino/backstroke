@@ -446,10 +446,10 @@ class VolTargetStrategy(HistoricalSimulator):
             log_ret = np.log(prices).diff().fillna(0) # (change 0th entry to 0)
 
             # collect rolling `burn_in`-day standard deviations; slice out nans
-            devs = log_ret.rolling(self.burn_in).std()[self.burn_in - 1:]
+            devs = log_ret.rolling(self.burn_in).std()[self.start_date:]
 
             # save the array of standard deviations after annualizing them
-            stds[nm] = devs.values * np.sqrt(252)
+            stds[nm] = devs * np.sqrt(252)
             # tried a numpy-only solution but the speed gain was minimal:
             # https://stackoverflow.com/questions/43284304/
 
@@ -479,7 +479,7 @@ class VolTargetStrategy(HistoricalSimulator):
                 p1 = self.assets[nm1]['df']['adjClose']
                 p2 = self.assets[nm2]['df']['adjClose']
 
-                corr = p1.rolling(self.burn_in).corr(p2)[self.burn_in-1:].values
+                corr = p1.rolling(self.burn_in).corr(p2)[self.start_date:]
                 # (correlation from Pearson product-moment corr. matrix)
                 # np.corrcoef(in, out) & np.cov(in,out) / (stddev_1 * stddev_2)
                 # give the same result (index [0][1]) when the stddevs' ddof = 1
@@ -547,9 +547,9 @@ class VolTargetStrategy(HistoricalSimulator):
         # (available sum to spend depends on rebalance type)
 
         # Get `burn_in`-day correlation and annualized standard deviation values
-        correlation = self.corrs[in_mkt_tick][out_mkt_tick][ind_active]
-        stddev_in = self.stds[in_mkt_tick][ind_active]
-        stddev_out = self.stds[out_mkt_tick][ind_active]
+        correlation = self.corrs[in_mkt_tick][out_mkt_tick][self.today]
+        stddev_in = self.stds[in_mkt_tick][self.today]
+        stddev_out = self.stds[out_mkt_tick][self.today]
 
         # Test different in/out weights and record resulting volatilites
         n_tests = 21
@@ -596,14 +596,14 @@ class VolTargetStrategy(HistoricalSimulator):
         if in_mkt_ideal == 0 and self.reinvest_dividends == True:
             # also sell partial shares
             in_mkt_sh = self.assets[in_mkt_tick]['shares']
-            print('in_mkt partial shares (if any) will be sold!')
+            my_pr('in_mkt partial shares (if any) will be sold!')
         in_mkt_delta = in_mkt_ideal - in_mkt_sh
 
         out_mkt_ideal = int((can_spend - in_mkt_pr * in_mkt_ideal) / out_mkt_pr)
         if out_mkt_ideal == 0 and self.reinvest_dividends == True:
             # also sell partial shares
             out_mkt_sh = self.assets[out_mkt_tick]['shares']
-            print('out_mkt partial shares (if any) will be sold!')
+            my_pr('out_mkt partial shares (if any) will be sold!')
         out_mkt_delta = out_mkt_ideal - out_mkt_sh
 
         # Find the resulting net change in shares held
