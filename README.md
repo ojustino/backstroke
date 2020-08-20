@@ -1,7 +1,8 @@
 ## `backstroke` 💧
 [![Binder](https://mybinder.org/badge_logo.svg)](https://mybinder.org/v2/gh/ojustino/backstroke/master?filepath=walkthrough.ipynb)
+[![Build Status](https://travis-ci.org/ojustino/backstroke.svg?branch=master)](https://travis-ci.com/github/ojustino/backstroke/)
 <br>
-*( ^ click above to run in the cloud)*
+*( ⬆️ click above to run in the cloud)*
 
 A Python package that allows users to create portfolio Strategy classes based
 on a "safe core, risky satellite" model and simulate their performances on
