@@ -1,12 +1,14 @@
 ## `backstroke` 💧
-<a href="https://mybinder.org/v2/gh/ojustino/backstroke/master?filepath=walkthrough.ipynb" target="_blank">
+<p>
+  <a href="https://mybinder.org/v2/gh/ojustino/backstroke/master?filepath=walkthrough.ipynb" target="_blank">
     <img src="https://mybinder.org/badge_logo.svg"/>
-</a>
-<a href="https://mybinder.org/v2/gh/ojustino/backstroke/master?filepath=walkthrough.ipynb" target="_blank">
+  </a>
+  <a href="https://travis-ci.com/github/ojustino/backstroke/" target="_blank">
     <img src="https://travis-ci.org/ojustino/backstroke.svg?branch=master"/>
-</a>
-
-*( ⬆️ click above to run in the cloud)*
+  </a>
+  <br />
+  <i> ( ⬆️ click above to run in the cloud) </i>
+</p>
 
 A Python package that allows users to create portfolio Strategy classes based
 on a <a href="https://www.investopedia.com/articles/financial-theory/08/core-satellite-investing.asp" target="_blank">
