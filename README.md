@@ -3,9 +3,9 @@
   <a href="https://mybinder.org/v2/gh/ojustino/backstroke/master?filepath=walkthrough.ipynb" target="_blank">
     <img src="https://mybinder.org/badge_logo.svg"/>
   </a>
-  <a href="https://travis-ci.com/github/ojustino/backstroke/" target="_blank">
+  <!-- <a href="https://travis-ci.com/github/ojustino/backstroke/" target="_blank">
     <img src="https://travis-ci.org/ojustino/backstroke.svg?branch=master"/>
-  </a>
+  </a> -->
   <br />
   <i> ( ⬆️ click above to run in the cloud) </i>
 </p>
