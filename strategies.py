@@ -318,36 +318,6 @@ class SMAStrategy(HistoricalSimulator):
         #self.rebalance_satellite.__func__.__doc__ = SAT_RB_DOCSTR
         self.refresh_parent.__func__.__doc__ = REFRESH_PARENT_DOCSTR
 
-    def calc_mv_avg(self, prices):
-        '''
-        Called from self._calc_rolling_smas().
-
-        A faster method of calculating moving averages than slicing + np.mean.
-        This method is also about an order of magnitude faster than
-        prices.rolling(window=self.burn_in).mean()[self.burn_in-1:].values.
-
-        Numerical precision apparently breaks down when len(prices) > 1e7, but
-        that's almost 30,000 years worth of days, so no worries currently. May
-        have to shift if we use price data with finer resoluion in the future.
-
-        Arguments
-        ---------
-
-        prices : pandas.core.series.Series, required
-            The selection of prices to be averaged.
-
-        Found here, along with concerns: https://stackoverflow.com/a/27681394
-        Simplified here: https://stackoverflow.com/a/43286184
-        '''
-        #cumsum = np.cumsum(np.insert(prices.values, 0, 0))
-        cumsum = np.cumsum(prices)
-        #return (cumsum[burn_in:] - cumsum[:-burn_in]) / float(burn_in)
-        cumsum[self.burn_in:] = (cumsum[self.burn_in:].values
-                                 - cumsum[:-self.burn_in].values)
-
-        active_ind = cumsum.index.get_loc(self.start_date)
-        return cumsum[active_ind - 1:] / self.burn_in
-
     def _calc_rolling_smas(self):
         '''
         Called from __init__() of SMAStrategy.
@@ -358,13 +328,23 @@ class SMAStrategy(HistoricalSimulator):
         Returns a dictionary with the same keys as self.assets. Each key
         contains a Series of rolling simple moving averages whose indices
         match up with self.active_dates.
+
+        (Sidenote: This method worked differently in commits up to March 2021,
+        but this configuration takes about the same runtime as the old
+        _calc_rolling_smas() and calc_moving_avg() combination even while adding
+        a shift. The resulting numbers are different at the 1e-12 level, but
+        that's probably too small to worry over for this application.)
         '''
         smas = {}
         for nm in self.assets.keys():
-            prices = self.assets[nm]['df']['adjClose']
+            # make `burn_in`-day collections of closing prices for all dates
+            rolled = self.assets[nm]['df']['adjClose'].rolling(self.burn_in,
+                                                               self.burn_in)
 
-            # get Series containing all `burn_in`-day simple moving averages
-            smas[nm] = self.calc_mv_avg(prices)
+            # calculate means; then shift them forward by one day so they're
+            # totally backward-looking instead of inclusive of the current day
+            # (should be NaN-safe due to buffer_days in HistoricalSimulator)
+            smas[nm] = rolled.mean().shift().loc[self.start_date:]
 
         return smas
 
@@ -571,11 +551,50 @@ class VolTargetStrategy(HistoricalSimulator):
         #self.rebalance_satellite.__func__.__doc__ = SAT_RB_DOCSTR
         self.refresh_parent.__func__.__doc__ = REFRESH_PARENT_DOCSTR
 
+    def _calc_correlations(self):
+        '''
+        Called from __init__() of VolTargetStrategy.
+
+        Calculates rolling inter-asset correlations for all tickers in
+        self.assets. Returns a DataFrame that takes two asset labels as indices
+        and gives back a Series containing correlation values between them.
+
+        For example, corrs['TICK1']['TICK2'] gives a Series of correlations
+        between TICK1 and TICK2. The Series' index contains the same dates as
+        the results of self._get_moving_stats() and in self.active_dates.
+        '''
+        all_keys = list(self.assets.keys())
+        rem_keys = all_keys.copy()
+        corrs = pd.DataFrame(columns=all_keys, index=all_keys)
+
+        for nm1 in all_keys:
+            rem_keys.remove(nm1)
+            for nm2 in rem_keys:
+                p1 = self.assets[nm1]['df']['adjClose']
+                p2 = self.assets[nm2]['df']['adjClose']
+
+                # calculate correlations and shift them forward by one day to
+                # keep them backward-looking and exclusive of the current day
+                # (should be NaN-safe due to buffer_days in HistoricalSimulator)
+                corr = p1.rolling(self.burn_in).corr(p2).shift()
+                # (correlation from Pearson product-moment corr. matrix)
+                # np.corrcoef(in, out) & np.cov(in,out) / (stddev_1 * stddev_2)
+                # give the same result (index [0][1]) when the stddevs' ddof = 1
+
+                corrs[nm1][nm2] = corrs[nm2][nm1] = corr.loc[self.start_date:]
+
+        # complete the DataFrame by setting all same-asset correlations to 1
+        ones = pd.Series(1., index=self.active_dates)
+        for nm in all_keys:
+            corrs[nm][nm] = ones
+
+        return corrs
+
     def _calc_rolling_stds(self):
         '''
         Called from __init__() of VolTargetStrategy.
 
-        Calculate rolling standard deviation for each ticker. The length of a
+        Calculates rolling standard deviation for each ticker. The length of a
         rolling period is self.burn_in.
 
         Returns a dictionary with the same keys as self.assets. Each key
@@ -589,8 +608,10 @@ class VolTargetStrategy(HistoricalSimulator):
             # record asset's daily logartihmic returns
             log_ret = np.log(prices).diff().fillna(0) # (change 0th entry to 0)
 
-            # collect rolling `burn_in`-day standard deviations; slice out nans
-            devs = log_ret.rolling(self.burn_in).std()[self.start_date:]
+            # collect active dates' rolling `burn_in`-day standard deviations,
+            # shifting them forward one day to keep them backward-looking
+            # (should be NaN-safe due to buffer_days in HistoricalSimulator)
+            devs = log_ret.rolling(self.burn_in).std().shift()[self.start_date:]
 
             # save a Series containing annualized standard deviations
             stds[nm] = devs * np.sqrt(252)
@@ -599,43 +620,10 @@ class VolTargetStrategy(HistoricalSimulator):
 
         return stds
 
-    def _calc_correlations(self):
-        '''
-        Called from __init__() of VolTargetStrategy.
-
-        Calculate rolling inter-asset correlations for all tickers in
-        self.assets. Returns a DataFrame that takes two asset labels as indices
-        and gives back an array of correlation values between those assets.
-
-        For example, corrs['TICK1']['TICK2'] (provide the ticker strings) gives
-        an array of correlations. The indices of the array match up with the
-        results of self._get_moving_stats() and self.active_dates.
-
-        At the moment, an asset's correlation with itself is NaN instead of an array of 1s. It should save a little time in the loop, but does it matter?
-        '''
-        all_keys = list(self.assets.keys())
-        rem_keys = all_keys.copy()
-        corrs = pd.DataFrame(columns=all_keys, index=all_keys)
-
-        for nm1 in all_keys:
-            rem_keys.remove(nm1)
-            for nm2 in rem_keys:
-                p1 = self.assets[nm1]['df']['adjClose']
-                p2 = self.assets[nm2]['df']['adjClose']
-
-                corr = p1.rolling(self.burn_in).corr(p2)[self.start_date:]
-                # (correlation from Pearson product-moment corr. matrix)
-                # np.corrcoef(in, out) & np.cov(in,out) / (stddev_1 * stddev_2)
-                # give the same result (index [0][1]) when the stddevs' ddof = 1
-
-                corrs[nm1][nm2] = corr
-                corrs[nm2][nm1] = corr
-
-        return corrs
-
     def refresh_parent(self):
         # docstring set in __init__()
-        pass
+        self.corrs = self._calc_correlations()
+        self.stds = self._calc_rolling_stds()
 
     def on_new_day(self):
         # docstring set in __init__()
