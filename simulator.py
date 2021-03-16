@@ -865,12 +865,17 @@ class HistoricalSimulator(ABC):
         deltas = []
         for name in names:
             ideal_frac = self.assets[name]['fraction']
-            ideal_holdings = pf_val * ideal_frac
+            ideal_shares = pf_val * ideal_frac
 
             curr_price = self.assets[name]['df'].loc[self.today, 'adjOpen']
-            curr_held = self.assets[name]['shares'] * curr_price
+            curr_shares = self.assets[name]['shares']
+            curr_held = curr_shares * curr_price
 
-            delta_shares = (ideal_holdings - curr_held) // curr_price
+            # delta_shares must be an integer, so a full asset liquidation is
+            # assumed any time it is within 1 of curr_shares (e.g., 87 & 87.74)
+            delta_shares = (ideal_shares - curr_held) // curr_price
+            delta_shares = (-curr_shares if curr_shares != 0
+                            and curr_shares+delta_shares < 1 else delta_shares)
             deltas.append(delta_shares)
 
         return deltas

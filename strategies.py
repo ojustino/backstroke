@@ -1,10 +1,7 @@
 #!/usr/bin/python3
 from simulator import HistoricalSimulator
-from datetime import datetime, timedelta
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import time
 
 '''
 This file holds example Strategy classes that inherit from HistoricalSimulator
@@ -20,6 +17,146 @@ BURN_IN_DOCSTR = HistoricalSimulator.burn_in.__doc__
 ON_NEW_DAY_DOCSTR = HistoricalSimulator.on_new_day.__doc__
 SAT_RB_DOCSTR = HistoricalSimulator.rebalance_satellite.__doc__
 REFRESH_PARENT_DOCSTR = HistoricalSimulator.refresh_parent.__doc__
+
+class TopXSplitStrategy(HistoricalSimulator):
+    '''
+    A Strategy class that buys into the "top X" performing assets over a
+    previous number of days from a user-generated list. This is a "follow the
+    demand" strategy that hopes any uptrends it finds continue to last.
+
+    Arguments
+    ---------
+
+    Portfolio : `portfolio_maker.PortfolioMaker`, required
+        A PortfolioMaker instance whose `assets` attribute contains your desired
+        assets, fractions, and categories. **Its `sat_frac` attribute must be 0
+        for it to work with this Strategy.**
+
+    burn_in : float, optional
+        The number of previous days to consider for the asset performance
+        calculation. For example, `burn_in=20` considers the percent change
+        in an asset's closing price from 20 market days ago and the last market
+        day before today.
+
+    top_x : float, optional
+        The number of top-perfoming assets to include in the portfolio on
+        rebalances. For example, `top_x=3` will split the portfolio between the
+        top 3 performing assets in the last `burn_in` days.
+
+    **kwargs : See "Arguments" in the docstring for HistoricalSimulator, but
+    make sure to not use `sat_rb_freq` as it's incompatible with this Strategy.
+    '''
+
+    def __init__(self, Portfolio, burn_in=30, top_x=3, **kwargs):
+        # save number of burn in days
+        self.burn_in = burn_in
+
+        # pre-validate kwargs, then set up HistoricalSimulator instance
+        kwargs = self._pre_validate_args(Portfolio, **kwargs)
+        super().__init__(Portfolio, **kwargs)
+
+        # then, set strategy-specific attributes
+        self.top_x = top_x
+        self.pct_changes = self._calc_pct_changes()
+
+        # use existing docstrings for unchanged abstract methods
+        #self.on_new_day.__func__.__doc__ = ON_NEW_DAY_DOCSTR
+        self.rebalance_satellite.__func__.__doc__ = SAT_RB_DOCSTR
+        self.refresh_parent.__func__.__doc__ = REFRESH_PARENT_DOCSTR
+
+    def _pre_validate_args(self, Portfolio, **kwargs):
+        '''
+        Ensure that the keyword arguments meant for HistoricalSimulator are
+        valid for this type of Strategy. (For TopXSplitStrategy, that means
+        disallowing satellite assets.)
+
+        See the  __init__() docstring for more on `Portfolio` and **kwargs.
+        '''
+        # satellite fraction must be 0
+        if Portfolio.sat_frac != 0:
+            raise ValueError("This Strategy can't have satellite assets, so "
+                             "the Portfolio object's `sat_frac` must equal 0.")
+            # this being the case, even if there are satellite assets in
+            # Portfolio, they won't affect the simulation
+
+        # if tot_rb_freq is present, set sat_rb_freq equal to it
+        # to avoid satellite-only rebalances
+        if 'tot_rb_freq' in kwargs:
+            kwargs['sat_rb_freq'] = kwargs['tot_rb_freq']
+            # warn the user that this is happening?
+        elif 'sat_rb_freq' in kwargs:
+            raise ValueError("This Strategy doesn't use satellite assets, "
+                             "so `sat_rb_freq` should not be set.")
+        return kwargs
+
+    def _calc_pct_changes(self):
+        '''
+        Called from __init__() of TopXSplitStrategy.
+
+        Calculate the rolling, `burn-in`-day percent changes between closing
+        prices for each 'core'=labeled ticker.
+
+        Returns a dictionary with the same keys as self.assets. Each key
+        contains a Series of rolling percent changes whose indices match up with
+        self.active_dates.
+        '''
+
+        pct_changes = {}
+
+        for nm in self.core_names:
+            # (past method of building dataFrame; included current day's close)
+            #prices = self.assets[nm]['df']['adjClose'].pct_change(self.burn_in)
+            #pct_changes[nm] = prices[self.start_date:]
+
+            # get array of all `burn_in`-day percent changes for this asset
+            all_closes = self.assets[nm]['df']['adjClose']
+            all_changes = all_closes.pct_change(self.burn_in).shift()
+
+            # shift them forward by one day so the calculation is totally
+            # backward-looking instead of inclusive of the current day
+            # (should be NaN-safe due to buffer_days in HistoricalSimulator)
+            pct_changes[nm] = all_changes[self.start_date:]
+
+        return pct_changes
+
+    def refresh_parent(self): # docstring set in __init__()
+        self.pct_changes = self._calc_pct_changes()
+
+    def on_new_day(self):
+        '''
+        Called in HistoricalSimulator.begin_time_loop().
+
+        Tracks the best-performing `top_x` assets by percent change in the last
+        `burn_in` days. (Note that the portfolio's composition will only change
+        on rebalance days.)
+
+        Returns
+        -------
+
+        Nothing.
+        '''
+        frac = 1 / self.top_x
+
+        # get today's percent change for each ticker; rank them best to worst
+        changes = {tk: self.pct_changes[tk].loc[self.today]
+                   for tk in self.core_names}
+        ranked = sorted(changes.items(), key=lambda itms: itms[1], reverse=True)
+
+        # separate top performing tickers from the rest
+        top_tks = dict(ranked[:self.top_x]).keys()
+        oth_tks = dict(ranked[self.top_x:]).keys()
+
+        # set intended portfolio fraction for top performing tickers
+        for tk in top_tks:
+            self.assets[tk]['fraction'] = frac
+
+        # exclude other tickers from the portfolio
+        for tk in oth_tks:
+            self.assets[tk]['fraction'] = 0
+
+    def rebalance_satellite(self, day, verbose=False):
+        # docstring set in __init__()
+        return []
 
 class BuyAndHoldStrategy(HistoricalSimulator):
     '''
@@ -50,6 +187,13 @@ class BuyAndHoldStrategy(HistoricalSimulator):
         self.refresh_parent.__func__.__doc__ = REFRESH_PARENT_DOCSTR
 
     def _pre_validate_args(self, Portfolio, **kwargs):
+        '''
+        Ensure that the keyword arguments meant for HistoricalSimulator are
+        valid for this type of Strategy. (For BuyAndHoldStrategy, that means
+        disallowing satellite assets.)
+
+        See the  __init__() docstring for more on `Portfolio` and **kwargs.
+        '''
         # satellite fraction must be 0
         if Portfolio.sat_frac != 0:
             raise ValueError("This Strategy can't have satellite assets, so "
@@ -212,14 +356,14 @@ class SMAStrategy(HistoricalSimulator):
         ticker. The length of a period is `burn_in`.
 
         Returns a dictionary with the same keys as self.assets. Each key
-        contains an array of rolling simple moving averages whose indices match
-        up with self.active_dates.
+        contains a Series of rolling simple moving averages whose indices
+        match up with self.active_dates.
         '''
         smas = {}
         for nm in self.assets.keys():
             prices = self.assets[nm]['df']['adjClose']
 
-            # get array of all `burn_in`-day simple moving averages
+            # get Series containing all `burn_in`-day simple moving averages
             smas[nm] = self.calc_mv_avg(prices)
 
         return smas
@@ -435,7 +579,7 @@ class VolTargetStrategy(HistoricalSimulator):
         rolling period is self.burn_in.
 
         Returns a dictionary with the same keys as self.assets. Each key
-        contains an array of rolling standard deviations whose indices match up
+        contains a Series of rolling standard deviations whose indices match up
         with self.active_dates.
         '''
         stds = {}
@@ -448,7 +592,7 @@ class VolTargetStrategy(HistoricalSimulator):
             # collect rolling `burn_in`-day standard deviations; slice out nans
             devs = log_ret.rolling(self.burn_in).std()[self.start_date:]
 
-            # save the array of standard deviations after annualizing them
+            # save a Series containing annualized standard deviations
             stds[nm] = devs * np.sqrt(252)
             # tried a numpy-only solution but the speed gain was minimal:
             # https://stackoverflow.com/questions/43284304/
