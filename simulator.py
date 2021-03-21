@@ -110,7 +110,7 @@ class HistoricalSimulator(ABC):
         # estimate period needed to warm up strategy's statistic(s) (converting
         # real days to approx. market days) and subtract result from start_date
         mkt_to_real_days = 365.25 / 252.75 # denominator is avg mkt days in year
-        buffer_days = int(self.burn_in * mkt_to_real_days) + 5
+        buffer_days = int(self.window * mkt_to_real_days) + 5
         self.open_date = pd.Timestamp(start_date - timedelta(buffer_days))
 
         # save dates over which analysis will take place
@@ -123,7 +123,7 @@ class HistoricalSimulator(ABC):
         # validate proposed asset dictionary, then add historical data to it
         self.assets = self._validate_assets_dict(Portfolio, verbose)
 
-        # make arrays of all dates in set and all *active* dates (sans burn-in)
+        # make arrays of all dates in set and all *active* dates
         self.all_dates, self.active_dates = self._get_date_arrays()
 
         # on which dates do rebalances occur, and are they satellite-only?
@@ -169,8 +169,8 @@ class HistoricalSimulator(ABC):
     @cash.setter
     def cash(self, value):
         if value < 0:
-            raise ValueError('More cash was spent than remains'
-                             ' in main portfolio.')
+            raise ValueError('More cash was spent than remains '
+                             'in main portfolio.')
         self._cash = value
 
     @property
@@ -187,11 +187,11 @@ class HistoricalSimulator(ABC):
     # define attribute and methods that must be present a child Strategy class
     # **(make sure to use the listed arguments)**
     @abstract_attribute
-    def burn_in(self):
+    def window(self):
         '''
         An attribute representing the number of days of data needed before a
         Strategy class can begin trading. For example, a Strategy based on a
-        200-day simple moving average of some asset's price needs `burn_in=200`.
+        200-day simple moving average of some asset's price needs `window=200`.
         '''
         pass
 
@@ -478,9 +478,9 @@ class HistoricalSimulator(ABC):
                 dt_str = dt.strftime('%Y-%m-%d')
                 od_str = self.open_date.strftime('%Y-%m-%d')
                 raise ValueError(f"{tk}'s start date of {dt_str} is later than "
-                                 "your open date (start date minus burn-in) "
+                                 "your open date (start date minus window) "
                                  f"of {od_str}. Try a later start date, a "
-                                 "decreased burn-in, or a different ticker.")
+                                 "decreased window, or a different ticker.")
 
         # are all assets still active by self.end_date?
         for i, dt in enumerate(tick_info['endDate']):
@@ -575,8 +575,8 @@ class HistoricalSimulator(ABC):
         Called in __init__() of HistoricalSimulator.
 
         Traverses downloaded historical data and returns an array with all
-        available dates (self.all_dates) and another with the burn-in dates
-        removed (self.active_dates).
+        available dates (self.all_dates) and another only containing dates used
+        in an eventual simulation (self.active_dates).
 
         Also changes self.start_date to the next market day if the user's
         original choice is absent from the data.
@@ -1110,8 +1110,7 @@ class HistoricalSimulator(ABC):
 
             # AT OPEN: rebalance if needed
             if self.today in self.rb_info.index: # 2x faster than check by index
-                # make rebalance calculations based on YESTERDAY'S STATS,
-                # which come at index [i - burn_in] of smas, stds, etc.
+                # make rebalance calculations based on YESTERDAY'S STATS
 
                 try:
                     my_pr('**** on', self.today.strftime('%Y-%m-%d'),
@@ -1144,6 +1143,10 @@ class HistoricalSimulator(ABC):
                 # https://stackoverflow.com/a/45983830
                 # turns out it's the fastest pandas assignment method, but list
                 # append and numpy array assignment are 200x faster in this case
+
+            # save today's date before moving to next iteration (for potential
+            # use in getting previous close in on_new_day() post-start_date)
+            self.prev_day = self.today
 
         my_pr(f"{time.time() - go:.3f} s for time loop")
 

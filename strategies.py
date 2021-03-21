@@ -6,14 +6,14 @@ import pandas as pd
 '''
 This file holds example Strategy classes that inherit from HistoricalSimulator
 and provide the logic for the decisions made in a portfolio's satellite
-portion. The `on_new_day()` and `rebalance_satellite()` methods and `burn_in`
+portion. The `on_new_day()` and `rebalance_satellite()` methods and `window`
 attribute are required in order for HistoricalSimulator to work properly. As
 long as you include those, it's also possible to write new Strategy classes
 using your own trading logic.
 '''
 
 # save docstrings from required attributes/methods for convenience, if needed
-BURN_IN_DOCSTR = HistoricalSimulator.burn_in.__doc__
+WINDOW_DOCSTR = HistoricalSimulator.window.__doc__
 ON_NEW_DAY_DOCSTR = HistoricalSimulator.on_new_day.__doc__
 SAT_RB_DOCSTR = HistoricalSimulator.rebalance_satellite.__doc__
 REFRESH_PARENT_DOCSTR = HistoricalSimulator.refresh_parent.__doc__
@@ -32,24 +32,24 @@ class TopXSplitStrategy(HistoricalSimulator):
         assets, fractions, and categories. **Its `sat_frac` attribute must be 0
         for it to work with this Strategy.**
 
-    burn_in : float, optional
+    window : float, optional
         The number of previous days to consider for the asset performance
-        calculation. For example, `burn_in=20` considers the percent change
+        calculation. For example, `window=20` considers the percent change
         in an asset's closing price from 20 market days ago and the last market
         day before today.
 
     top_x : float, optional
         The number of top-perfoming assets to include in the portfolio on
         rebalances. For example, `top_x=3` will split the portfolio between the
-        top 3 performing assets in the last `burn_in` days.
+        top 3 performing assets in the last `window` days.
 
     **kwargs : See "Arguments" in the docstring for HistoricalSimulator, but
     make sure to not use `sat_rb_freq` as it's incompatible with this Strategy.
     '''
 
-    def __init__(self, Portfolio, burn_in=30, top_x=3, **kwargs):
-        # save number of burn in days
-        self.burn_in = burn_in
+    def __init__(self, Portfolio, window=30, top_x=3, **kwargs):
+        # save number of days in window
+        self.window = window
 
         # pre-validate kwargs, then set up HistoricalSimulator instance
         kwargs = self._pre_validate_args(Portfolio, **kwargs)
@@ -57,7 +57,7 @@ class TopXSplitStrategy(HistoricalSimulator):
 
         # then, set strategy-specific attributes
         self.top_x = top_x
-        self.pct_changes = self._calc_pct_changes()
+        self.hist_pct_changes = self._calc_pct_changes()
 
         # use existing docstrings for unchanged abstract methods
         #self.on_new_day.__func__.__doc__ = ON_NEW_DAY_DOCSTR
@@ -93,24 +93,27 @@ class TopXSplitStrategy(HistoricalSimulator):
         '''
         Called from __init__() of TopXSplitStrategy.
 
-        Calculate the rolling, `burn-in`-day percent changes between closing
-        prices for each 'core'=labeled ticker.
+        Calculate the rolling historical `window`-day percent changes between
+        closing prices for each 'core'-labeled ticker in self.assets.
 
         Returns a dictionary with the same keys as self.assets. Each key
         contains a Series of rolling percent changes whose indices match up with
         self.active_dates.
+
+        For a 20-day period, the value at index 21 of any key is the percent
+        change in closing price between days 1 and 20.
         '''
 
         pct_changes = {}
 
         for nm in self.core_names:
             # (past method of building dataFrame; included current day's close)
-            #prices = self.assets[nm]['df']['adjClose'].pct_change(self.burn_in)
+            #prices = self.assets[nm]['df']['adjClose'].pct_change(self.window)
             #pct_changes[nm] = prices[self.start_date:]
 
-            # get array of all `burn_in`-day percent changes for this asset
+            # get array of all `window`-day percent changes for this asset
             all_closes = self.assets[nm]['df']['adjClose']
-            all_changes = all_closes.pct_change(self.burn_in).shift()
+            all_changes = all_closes.pct_change(self.window).shift()
 
             # shift them forward by one day so the calculation is totally
             # backward-looking instead of inclusive of the current day
@@ -120,14 +123,14 @@ class TopXSplitStrategy(HistoricalSimulator):
         return pct_changes
 
     def refresh_parent(self): # docstring set in __init__()
-        self.pct_changes = self._calc_pct_changes()
+        self.hist_pct_changes = self._calc_pct_changes()
 
     def on_new_day(self):
         '''
         Called in HistoricalSimulator.begin_time_loop().
 
         Tracks the best-performing `top_x` assets by percent change in the last
-        `burn_in` days. (Note that the portfolio's composition will only change
+        `window` days. (Note that the portfolio's composition will only change
         on rebalance days.)
 
         Returns
@@ -138,7 +141,7 @@ class TopXSplitStrategy(HistoricalSimulator):
         frac = 1 / self.top_x
 
         # get today's percent change for each ticker; rank them best to worst
-        changes = {tk: self.pct_changes[tk].loc[self.today]
+        changes = {tk: self.hist_pct_changes[tk].loc[self.today]
                    for tk in self.core_names}
         ranked = sorted(changes.items(), key=lambda itms: itms[1], reverse=True)
 
@@ -177,7 +180,7 @@ class BuyAndHoldStrategy(HistoricalSimulator):
     def __init__(self, Portfolio, **kwargs):
         kwargs = self._pre_validate_args(Portfolio, **kwargs)
 
-        self.burn_in = 0 # no burn-in needed for this strategy
+        self.window = 0 # no past price info is needed for this Strategy
 
         super().__init__(Portfolio, **kwargs)
 
@@ -228,7 +231,7 @@ class SMAStrategy(HistoricalSimulator):
     '''
     A Strategy that assigns the entire satellite portion of a portfolio to
     either the in-market or out-of-market asset depending on whether a tracked
-    asset's current price is above a multiple of its X-day (see `burn_in` in
+    asset's current price is above a multiple of its X-day (see `window` in
     "Arguments") simple moving average, or SMA.
 
     Method self.on_new_day() makes this comparison every day and changes
@@ -252,10 +255,10 @@ class SMAStrategy(HistoricalSimulator):
         the asset whose simple moving average is used to make decisions in
         self.on_new_day().
 
-    burn_in : float, optional
+    window : float, optional
         An attribute representing the number of days of data needed before a
         Strategy class can begin trading. For example, a 200-day simple moving
-        average needs `burn_in=200`.
+        average needs `window=200`.
 
     **kwargs : See "Arguments" in the docstring for HistoricalSimulator.
 
@@ -286,9 +289,9 @@ class SMAStrategy(HistoricalSimulator):
     almost any 5+ year period, bear or bull.
     (Also: inspired by https://seekingalpha.com/article/4230171)
     '''
-    def __init__(self, Portfolio, burn_in=200, **kwargs):
-        # save number of burn in days
-        self.burn_in = burn_in
+    def __init__(self, Portfolio, window=200, **kwargs):
+        # save number of days in window
+        self.window = window
 
         super().__init__(Portfolio, **kwargs)
 
@@ -302,7 +305,7 @@ class SMAStrategy(HistoricalSimulator):
                            f"You have {len(to_track)} tickers with this key.")
 
         # calculate assets' rolling simple moving average from daily closes
-        self.smas = self._calc_rolling_smas()
+        self.hist_smas = self._calc_rolling_smas()
 
         # daily indicators related to tracked asset
         self.sma_streak = 0 # how many consecutive days of price above SMA?
@@ -322,12 +325,15 @@ class SMAStrategy(HistoricalSimulator):
         '''
         Called from __init__() of SMAStrategy.
 
-        Calculate rolling simple moving average of closing price for each
-        ticker. The length of a period is `burn_in`.
+        Calculates the historical rolling `window`-day simple moving average of
+        closing price for each ticker in self.assets.
 
         Returns a dictionary with the same keys as self.assets. Each key
         contains a Series of rolling simple moving averages whose indices
         match up with self.active_dates.
+
+        For a 20-day SMA, the value at index 21 of any key is the average close
+        from days 1-20.
 
         (Sidenote: This method worked differently in commits up to March 2021,
         but this configuration takes about the same runtime as the old
@@ -337,9 +343,9 @@ class SMAStrategy(HistoricalSimulator):
         '''
         smas = {}
         for nm in self.assets.keys():
-            # make `burn_in`-day collections of closing prices for all dates
-            rolled = self.assets[nm]['df']['adjClose'].rolling(self.burn_in,
-                                                               self.burn_in)
+            # make `window`-day collections of closing prices for all dates
+            rolled = self.assets[nm]['df']['adjClose'].rolling(self.window,
+                                                               self.window)
 
             # calculate means; then shift them forward by one day so they're
             # totally backward-looking instead of inclusive of the current day
@@ -349,15 +355,16 @@ class SMAStrategy(HistoricalSimulator):
         return smas
 
     def refresh_parent(self): # docstring set in __init__()
-        self.smas = self._calc_rolling_smas()
+        self.hist_smas = self._calc_rolling_smas()
 
     def on_new_day(self): # docstring set in __init__()
-        tracked_price = self.assets[self.track_tick]['df'].loc[self.today,
-                                                               'adjClose']
-        tracked_sma = self.smas[self.track_tick].loc[self.today]
+        # get YESTERDAY's close and the tracked asset's current `window`-day SMA
+        prev_close = self.assets[self.track_tick]['df'].loc[self.prev_day,
+                                                            'adjClose']
+        prev_sma = self.hist_smas[self.track_tick].loc[self.today]
 
-        # check if SMA is over our threshold and adjust streak counters
-        if tracked_price >= tracked_sma * self.sma_threshold: # streak builds
+        # check if close was over SMA threshold and adjust streak counters
+        if prev_close >= prev_sma * self.sma_threshold: # streak builds
             self.sma_streak += 1
             if self.sma_streak >= 3 and self.days_out >= self.retreat_period:
                 # if we were out, get back in
@@ -496,13 +503,13 @@ class VolTargetStrategy(HistoricalSimulator):
         A PortfolioMaker instance whose `assets` attribute contains your desired
         assets, fractions, and categories.
 
-    burn_in : float, optional
+    window : float, optional
         An attribute representing the number of days of data needed before a
         Strategy class can begin trading. For example, using 30-day volatility
-        requires that `burn_in=30`. [default: 30]
+        requires that `window=30`. [default: 30]
 
     vol_target : float, optional
-        The target `burn_in`-day annualized volatility for the satellite
+        The target `window`-day annualized volatility for the satellite
         portfolio. Takes decimal values, not percentages. [default: .15]
 
     **kwargs : See "Arguments" in the docstring for HistoricalSimulator.
@@ -530,21 +537,21 @@ class VolTargetStrategy(HistoricalSimulator):
     targeting volatility reduces risk compared to a standard SPY/AGG portfolio
     while still outperforming it most of the time. Let's put it to the test.
     '''
-    def __init__(self, Portfolio, burn_in=30, vol_target=.15, **kwargs):
-        # save number of burn in days
-        self.burn_in = burn_in # volatility period
+    def __init__(self, Portfolio, window=30, vol_target=.15, **kwargs):
+        # save number of days in window for calculating historical volatility
+        self.window = window
 
         super().__init__(Portfolio, **kwargs)
 
         # then, set strategy-specific attributes
-        # set target `burn_in`-day annualized volatility for satellite portfolio
+        # set target `window`-day annualized volatility for satellite portfolio
         self.vol_target = vol_target
 
         # calculate assets' rolling standard deviations from daily closes
-        self.stds = self._calc_rolling_stds()
+        self.hist_stds = self._calc_rolling_stds()
 
         # calculate inter-asset correlations
-        self.corrs = self._calc_correlations()
+        self.hist_corrs = self._calc_correlations()
 
         # use existing docstrings for unchanged abstract methods
         self.on_new_day.__func__.__doc__ = ON_NEW_DAY_DOCSTR
@@ -555,13 +562,16 @@ class VolTargetStrategy(HistoricalSimulator):
         '''
         Called from __init__() of VolTargetStrategy.
 
-        Calculates rolling inter-asset correlations for all tickers in
-        self.assets. Returns a DataFrame that takes two asset labels as indices
+        Calculates historical rolling `window`-day correlations between all
+        tickers in self.assets.
+
+        Returns a DataFrame that takes two asset labels as indices
         and gives back a Series containing correlation values between them.
 
         For example, corrs['TICK1']['TICK2'] gives a Series of correlations
-        between TICK1 and TICK2. The Series' index contains the same dates as
-        the results of self._get_moving_stats() and in self.active_dates.
+        between TICK1 and TICK2. For a 20-day window, the value at index 21 is
+        their correlation from days 1-20. The Series' index contains the same
+        dates as self.active_dates and the results of self._get_moving_stats().
         '''
         all_keys = list(self.assets.keys())
         rem_keys = all_keys.copy()
@@ -576,7 +586,7 @@ class VolTargetStrategy(HistoricalSimulator):
                 # calculate correlations and shift them forward by one day to
                 # keep them backward-looking and exclusive of the current day
                 # (should be NaN-safe due to buffer_days in HistoricalSimulator)
-                corr = p1.rolling(self.burn_in).corr(p2).shift()
+                corr = p1.rolling(self.window).corr(p2).shift()
                 # (correlation from Pearson product-moment corr. matrix)
                 # np.corrcoef(in, out) & np.cov(in,out) / (stddev_1 * stddev_2)
                 # give the same result (index [0][1]) when the stddevs' ddof = 1
@@ -594,12 +604,15 @@ class VolTargetStrategy(HistoricalSimulator):
         '''
         Called from __init__() of VolTargetStrategy.
 
-        Calculates rolling standard deviation for each ticker. The length of a
-        rolling period is self.burn_in.
+        Calculates historical rolling `window`-day standard deviations
+        (annualized) for all tickers in self.assets.
 
         Returns a dictionary with the same keys as self.assets. Each key
         contains a Series of rolling standard deviations whose indices match up
         with self.active_dates.
+
+        For a 20-day window, the value at index 21 of any key is that asset's
+        annualized standard deviation from days 1-20.
         '''
         stds = {}
         for nm in self.assets.keys():
@@ -608,10 +621,10 @@ class VolTargetStrategy(HistoricalSimulator):
             # record asset's daily logartihmic returns
             log_ret = np.log(prices).diff().fillna(0) # (change 0th entry to 0)
 
-            # collect active dates' rolling `burn_in`-day standard deviations,
+            # collect active dates' rolling `window`-day standard deviations,
             # shifting them forward one day to keep them backward-looking
             # (should be NaN-safe due to buffer_days in HistoricalSimulator)
-            devs = log_ret.rolling(self.burn_in).std().shift()[self.start_date:]
+            devs = log_ret.rolling(self.window).std().shift()[self.start_date:]
 
             # save a Series containing annualized standard deviations
             stds[nm] = devs * np.sqrt(252)
@@ -622,8 +635,8 @@ class VolTargetStrategy(HistoricalSimulator):
 
     def refresh_parent(self):
         # docstring set in __init__()
-        self.corrs = self._calc_correlations()
-        self.stds = self._calc_rolling_stds()
+        self.hist_corrs = self._calc_correlations()
+        self.hist_stds = self._calc_rolling_stds()
 
     def on_new_day(self):
         # docstring set in __init__()
@@ -678,10 +691,10 @@ class VolTargetStrategy(HistoricalSimulator):
                      else total_mkt_val * self.sat_frac)
         # (available sum to spend depends on rebalance type)
 
-        # Get `burn_in`-day correlation and annualized standard deviation values
-        correlation = self.corrs[in_mkt_tick][out_mkt_tick][self.today]
-        stddev_in = self.stds[in_mkt_tick][self.today]
-        stddev_out = self.stds[out_mkt_tick][self.today]
+        # Get `window`-day correlation and annualized standard deviation values
+        correlation = self.hist_corrs[in_mkt_tick][out_mkt_tick][self.today]
+        stddev_in = self.hist_stds[in_mkt_tick][self.today]
+        stddev_out = self.hist_stds[out_mkt_tick][self.today]
 
         # Test different in/out weights and record resulting volatilites
         n_tests = 21

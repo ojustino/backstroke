@@ -126,7 +126,7 @@ def test_sma():
     pf2.add_ticker('AGG', .4, label='benchmark')
 
     # initialize Strategy and swap price columns
-    sma = SMAStrategy(pf2, burn_in=100,
+    sma = SMAStrategy(pf2, window=100,
                       start_date=pd.Timestamp(2019, 12, 12),
                       end_date=pd.Timestamp(2020, 8, 13),
                       cash=1738.29, reinvest_dividends=True,
@@ -181,7 +181,7 @@ def test_vlt():
     pf3.add_ticker('GLD', 1, label='benchmark')
 
     # initialize Strategy and swap price columns
-    vlt = VolTargetStrategy(pf3, burn_in=30, vol_target=.15,
+    vlt = VolTargetStrategy(pf3, window=30, vol_target=.15,
                             start_date=pd.Timestamp(2018, 7, 27),
                             end_date=pd.Timestamp(2019, 7, 31),
                             cash=5500, reinvest_dividends=False,
