@@ -565,7 +565,7 @@ class VolTargetStrategy(HistoricalSimulator):
         Calculates historical rolling `window`-day correlations between all
         tickers in self.assets.
 
-        Returns a DataFrame that takes two asset labels as indices
+        Returns a nested dictionary that takes two asset labels as indices
         and gives back a Series containing correlation values between them.
 
         For example, corrs['TICK1']['TICK2'] gives a Series of correlations
@@ -575,8 +575,13 @@ class VolTargetStrategy(HistoricalSimulator):
         '''
         all_keys = list(self.assets.keys())
         rem_keys = all_keys.copy()
-        corrs = pd.DataFrame(columns=all_keys, index=all_keys)
 
+        # create nested dictionary with all asset pairs (Series of ones by
+        # default to cover the same-asset scenario up front)
+        ones = pd.Series(1., index=self.active_dates)
+        corrs = {tk1: {tk2: ones for tk2 in all_keys} for tk1 in all_keys}
+
+        # fill the dictionary with each Series of inter-asset correlations
         for nm1 in all_keys:
             rem_keys.remove(nm1)
             for nm2 in rem_keys:
@@ -592,11 +597,6 @@ class VolTargetStrategy(HistoricalSimulator):
                 # give the same result (index [0][1]) when the stddevs' ddof = 1
 
                 corrs[nm1][nm2] = corrs[nm2][nm1] = corr.loc[self.start_date:]
-
-        # complete the DataFrame by setting all same-asset correlations to 1
-        ones = pd.Series(1., index=self.active_dates)
-        for nm in all_keys:
-            corrs[nm][nm] = ones
 
         return corrs
 
