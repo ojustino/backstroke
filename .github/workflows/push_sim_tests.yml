@@ -1,0 +1,38 @@
+name: push-sim-tests
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - 'main'
+    types: [ synchronize ]
+
+env:
+  pip_install_cmd: 'python -m pip install pytest -r binder/requirements.txt'
+  test_cmd: 'pytest -s' # increases pytest's verbosity
+
+jobs:
+  do-sim-tests:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: [3.7, 3.9]
+
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@v2
+        with:
+          python-version: "${{ matrix.python-version }}"
+
+      - name: Check out repository
+        uses: actions/checkout@v2
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          ${{ env.pip_install_cmd }}
+
+      - name: Run tests
+        run: ${{ env.test_cmd }}

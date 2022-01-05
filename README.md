@@ -6,6 +6,9 @@
   <!-- <a href="https://travis-ci.com/github/ojustino/backstroke/" target="_blank">
     <img src="https://travis-ci.org/ojustino/backstroke.svg?branch=master"/>
   </a> -->
+  <a href="" target="_blank">
+    <img src="https://github.com/ojustino/backstroke/actions/workflows/cron_sim_tests.yml"/>
+  </a>
   <br />
   <i> ( ⬆️ click above to run in the cloud) </i>
 </p>
@@ -37,7 +40,8 @@ _(bear with me; I'm job-hunting)_
 
 data(Frame) manipulation with `pandas`, fetching data over HTTP with `requests`,
 object-oriented programming with abstract base classes, visualization with
-`matplotlib`, cloud-based Jupyter environment creation with Binder and Docker.
+`matplotlib`, cloud-based Jupyter environment creation with Binder and Docker,
+and continuous integration with `pytest` and GitHub Actions (formerly Travis).
 
 ### Example usage:
 
