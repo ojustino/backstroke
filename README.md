@@ -1,6 +1,6 @@
 ## `backstroke` 💧
 <p>
-  <a href="https://mybinder.org/v2/gh/ojustino/backstroke/master?filepath=walkthrough.ipynb" target="_blank">
+  <a href="https://mybinder.org/v2/gh/ojustino/backstroke/main?filepath=walkthrough.ipynb" target="_blank">
     <img src="https://mybinder.org/badge_logo.svg"/>
   </a>
   <!-- <a href="https://travis-ci.com/github/ojustino/backstroke/" target="_blank">
@@ -68,5 +68,5 @@ pip install .
 This project uses a
 <a href="https://github.com/ojustino/backstroke/blob/master/LICENSE.md" target="_blank">
     slightly modified version
-<a/> of the PolyForm Noncommercial License 1.0.0. Basically, you're free to
+</a> of the PolyForm Noncommercial License 1.0.0. Basically, you're free to
 view, run, download, and modify this package for any non-commercial purpose.

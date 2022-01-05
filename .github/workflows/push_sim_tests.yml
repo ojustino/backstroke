@@ -6,7 +6,7 @@ on:
   pull_request:
     branches:
       - 'main'
-    types: [ synchronize ]
+    types: [ opened, synchronize ]
 
 env:
   pip_install_cmd: 'python -m pip install pytest -r binder/requirements.txt'
