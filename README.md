@@ -1,11 +1,14 @@
 ## `backstroke` 💧
 <p>
-  <a href="https://mybinder.org/v2/gh/ojustino/backstroke/master?filepath=walkthrough.ipynb" target="_blank">
+  <a href="https://mybinder.org/v2/gh/ojustino/backstroke/main?filepath=walkthrough.ipynb" target="_blank">
     <img src="https://mybinder.org/badge_logo.svg"/>
   </a>
   <!-- <a href="https://travis-ci.com/github/ojustino/backstroke/" target="_blank">
     <img src="https://travis-ci.org/ojustino/backstroke.svg?branch=master"/>
   </a> -->
+  <a href="" target="_blank">
+    <img src="https://github.com/ojustino/backstroke/actions/workflows/cron_sim_tests.yml"/>
+  </a>
   <br />
   <i> ( ⬆️ click above to run in the cloud) </i>
 </p>
@@ -37,7 +40,8 @@ _(bear with me; I'm job-hunting)_
 
 data(Frame) manipulation with `pandas`, fetching data over HTTP with `requests`,
 object-oriented programming with abstract base classes, visualization with
-`matplotlib`, cloud-based Jupyter environment creation with Binder and Docker.
+`matplotlib`, cloud-based Jupyter environment creation with Binder and Docker,
+and continuous integration with `pytest` and GitHub Actions (formerly Travis).
 
 ### Example usage:
 
@@ -64,5 +68,5 @@ pip install .
 This project uses a
 <a href="https://github.com/ojustino/backstroke/blob/master/LICENSE.md" target="_blank">
     slightly modified version
-<a/> of the PolyForm Noncommercial License 1.0.0. Basically, you're free to
+</a> of the PolyForm Noncommercial License 1.0.0. Basically, you're free to
 view, run, download, and modify this package for any non-commercial purpose.
