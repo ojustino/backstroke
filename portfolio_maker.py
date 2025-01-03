@@ -435,8 +435,8 @@ class PortfolioMaker:
 
         # update the DataFrame with ticker start/end date info
         valid_tix = self._valid_tix
-        nu_df = self.tick_info.append(valid_tix[valid_tix['ticker'] == ticker])
-        self.tick_info = nu_df
+        self.tick_info = pd.concat([self.tick_info,
+                                    valid_tix[valid_tix['ticker'] == ticker]])
 
     def edit_ticker_fraction(self, ticker, value):
         '''

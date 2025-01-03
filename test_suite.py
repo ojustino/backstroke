@@ -67,7 +67,8 @@ def _rewind_prices(self):
                          / pre_div_prices)[::-1].cumprod()[::-1]
 
         # apply the dividend adjustments to previous prices
-        divFactors = pd.DataFrame(index=df.index, columns=cols, data=1)
+        divFactors = pd.DataFrame(index=df.index, columns=cols, data=1,
+                                  dtype=np.float64)
 
         for i, dt in enumerate(pre_div_dts):
             if i == 0:

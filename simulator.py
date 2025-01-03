@@ -314,7 +314,7 @@ class HistoricalSimulator(ABC):
         return cash + holdings
 
     def call_tiingo(self, tick, open_date,
-                    end_date=pd.to_datetime('now'), verbose=True):
+                    end_date=pd.Timestamp.today(), verbose=True):
         '''
         Called in self._build_assets_dict(), but can also be used independently.
 
@@ -335,7 +335,7 @@ class HistoricalSimulator(ABC):
         end_date : `pandas.Timestamp` or `datetime.datetime`, optional
             The final date of historical data to be downloaded. (When this
             method is called upon initializing HistoricalSimulator, this
-            argument is self.end_date.) [default: pandas.to_datetime('now')]
+            argument is self.end_date.) [default: pandas.Timestamp.today()]
 
         verbose : boolean, optional
             Whether or not to print the download's progress. [default: True]
@@ -755,7 +755,7 @@ class HistoricalSimulator(ABC):
             sat_mths[sat_mths == 0] += 12 # or else december would be 0
 
             # give total rebalances priority over satellite-only
-            sat_mths = sat_mths[~np.in1d(sat_mths, tot_mths)]
+            sat_mths = sat_mths[~np.isin(sat_mths, tot_mths)]
             my_pr('sat rb mths:', sat_mths, '\ntot rb mths:', tot_mths)
 
             # create list of dates when rebalances occur...
@@ -1388,7 +1388,7 @@ class HistoricalSimulator(ABC):
                            fontsize=14, logy=logy, ax=ax)
 
             # print final value of ticker holdings
-            my_pr(f"{tk} ending value: ${tick_info[-1]:,.2f}")
+            my_pr(f"{tk} ending value: ${tick_info.iloc[-1]:,.2f}")
 
         # plot a line showing the starting investment value
         ax.axhline(start_value, linestyle='--', c='k', alpha=.5)
