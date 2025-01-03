@@ -1,5 +1,5 @@
 # required packages for backstroke
 matplotlib>=3
-numpy>=1.17
-pandas==1.1.5
+numpy<2.3  # up to date as of 1/2025
+pandas<2.3  # up to date as of 1/2025
 requests>=2.32.2
