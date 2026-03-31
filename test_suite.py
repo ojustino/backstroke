@@ -17,23 +17,28 @@ def _rewind_prices(self):
     '''
     Takes a dataFrame from a symbol's 'df' key in the `assets` dictionary of a
     Strategy instance (e.g. bnh.assets['AAPL']['df']) and adjusts the
-    dataFrame's 'adj' columns (close, high, low, open) to approximate how they
-    would have looked on the Strategy instance's end date instead of on
-    whichever date the instance was created.
+    dataFrame's 'adj' columns (close, high, low, open) to the basis of the
+    prices on the Strategy instance's end date. **This makes simulation results
+    reproducible over time.**
 
-    This is useful because, as seen in cron job results, Tiingo's own 'adj'
-    column values vary over time as dividends and stock splits occur. To get
-    consistent results for testing purposes, you must either use the unadjusted
-    columns (ignoring dividends and splits) or figure out how to reproducibly
-    adjust the price values to your own liking (this!).
+    This is useful because Tiingo's own 'adj' values are adjusted to the basis
+    of the prices on the date the data were queried. This means the values
+    change over time as more dividend payments and stock splits occur. To get
+    consistent numbers, one must either use the unadjusted columns (and ignore
+    dividends and splits), always query price data until the present day (to
+    capture and factor in subsequent corporate actions), or otherwise adjust the
+    unadjusted prices in a reproducible manner (this!).
 
     Assigned to Strategy instances as a new method through MethodType.
 
-    NOTE: Past dates' 'adj' values won't exactly match the originals for
-    Strategy instances with end dates on your present date. This is likely
-    because the original 'close' column is rounded to only the hundredths
-    place. It should only be a small discrepancy: for AAPL from 1993-12-27 to
-    2021-02-10, the difference in 'adjClose' values is 3e-5 on the first day.
+    NOTE: Past dates' 'adj' values won't exactly match Tiingo's originals,
+    even when a Strategy query includes all corporate actions between the start
+    date and the present. This is almost fully because Tiingo's unadjusted
+    'close' column is rounded to 2 decimal places while they use more for their
+    adjustments. However, this is a minuscule discrepancy that doesn't affect
+    Strategy simulations. For example, the Tiingo-provided adjClose on the start
+    date of an AAPL query from 1993-12-27 to 2026-03-30 (conducted on the latter
+    date) was 0.02% different in price from this method's adjClose.
 
     NOTE: VALUES WILL NEED TO BE CHANGED AGAIN ONCE run_time_loop IS CORRECTED
     SUCH THAT IT DOESN'T DOUBLE COUNT DIVIDENDS.
@@ -42,50 +47,55 @@ def _rewind_prices(self):
         df = val['df'].copy()
         cols = ['close', 'high', 'low', 'open']
 
-        # split factor for each date through cumulative product
+        # split factor for each date through reversed cumulative product
         # (inspiration from https://stackoverflow.com/questions/62130566/)
-        tot_splits = df['splitFactor'].cumprod().values
+        tot_splits = df['splitFactor'][::-1].cumprod()[::-1].values
         tot_splits_cast = np.tile(tot_splits, (len(cols), 1)).T
 
-        # get dates and amounts of dividends
-        div_dts = df[df['divCash'] != 0].index
+        # get prices on dates that precede dividend ex-dates
+        # (excluding any that aren't present in the dataFrame)
+        div_dts_all = df[df['divCash'] != 0].index
+        pre_div_inds_all = df.index.get_indexer_for(div_dts_all)
+        pre_div_inds = pre_div_inds_all[pre_div_inds_all > 0]
+        pre_div_prices = df.iloc[pre_div_inds - 1][cols]
+
+        # get dates and amounts of remaining dividends
+        div_dts = div_dts_all[pre_div_inds_all > 0]
         div_amts = df.loc[div_dts, 'divCash'].values
         div_amts_cast = np.tile(div_amts, (len(cols), 1)).T
 
-        # get indices of days that precede dividend ex-dates
-        pre_div_inds = df.reset_index()[df.index.isin(div_dts)].index - 1
+        # calculate dividend adjustments on close (and other) prices
+        # (div_adjs_by_dt[::-1].cumprod()[::-1] == old tot_div_adjs)
+        div_adjs_by_dt = ((pre_div_prices - div_amts_cast) / pre_div_prices)
 
-        # get dates and prices of these pre-dividend indices
-        pre_div_dts = df.iloc[pre_div_inds].index
-        pre_div_prices = df.iloc[pre_div_inds][cols]
-        # (pre_div_closes, pre_div_highs,
-        #  pre_div_lows, pre_div_opens) = df.iloc[pre_div_inds][cols].T.values
+        # multiply each dividend adjustment into the dates before its ex date
+        divFactors = pd.DataFrame(index=df.index, columns=cols,
+                                  data=1, dtype=np.float64)
+        for dt in div_adjs_by_dt.index:
+            divFactors.loc[divFactors.index <= dt] *= div_adjs_by_dt.loc[dt]
 
-        # calculate dividend adjustments on close prices, then get
-        # cumulative product of these adjustments going backward in time
-        tot_div_adjs = ( (pre_div_prices - div_amts_cast)
-                         / pre_div_prices)[::-1].cumprod()[::-1]
+        # NOT NEEDED; DIVIDENDS ARE ALREADY BAKED INTO THE ADJUSTMENT
+        # # calculate each dividend's value as shares of previous (unadj.) close
+        # divs_in_shares = df.loc[div_dts, 'divCash'] / pre_div_prices['close'].values
 
-        # apply the dividend adjustments to previous prices
-        divFactors = pd.DataFrame(index=df.index, columns=cols, data=1,
-                                  dtype=np.float64)
-
-        for i, dt in enumerate(pre_div_dts):
-            if i == 0:
-                divFactors.loc[:pre_div_dts[i]] = tot_div_adjs.iloc[i].T.values
-            else:
-                divFactors.loc[div_dts[i-1] : pre_div_dts[i],
-                               :] = tot_div_adjs.iloc[i].T.values
+        # # scale each dividend to equivalent per-share value for adjusted prices;
+        # # rename original divCash column and replace with scaled values
+        # val['df']['OG_divCash'] = val['df']['divCash'].copy()
+        # for i, dt in enumerate(divs_in_shares.index):
+        #     val['df'].loc[dt, 'divCash'] = (
+        #         df.loc[df.index[pre_div_inds[i]], 'close']
+        #         * divs_in_shares.loc[dt]
+        #     )
 
         # rename Tiingo's adj columns
         adj_cols = ['adj' + c.title() for c in cols]
-        old_adj_cols = ['OG_' + c.title() for c in adj_cols]
+        old_adj_cols = ['OG_' + c for c in adj_cols]
         renames = {adj: old for adj, old in zip(adj_cols, old_adj_cols)}
 
         val['df'].rename(columns=renames, inplace=True)
 
-        # add the readjusted price colums to the original dataFrame
-        val['df'][adj_cols] = tot_splits_cast * divFactors * df[cols]
+        # add the readjusted price columns to the original dataFrame
+        val['df'][adj_cols] = df[cols] / tot_splits_cast * divFactors
 
     # reset benchmark portfolio starting value to reflect any price adjustments
     # (copied from HistoricalSimulator.__init__())
