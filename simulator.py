@@ -1418,3 +1418,87 @@ class HistoricalSimulator(ABC):
             return ax
 
         plt.show()
+
+    def normalize_price_bases(self):
+        '''
+        Takes a dataFrame from a symbol's 'df' key in the `assets` dictionary of
+        a Strategy instance (e.g. sim.assets['AAPL']['df']) and adjusts the
+        dataFrame's 'adj' columns (close, high, low, open) to the basis of the
+        prices on the Strategy instance's end date. **This makes simulation
+        results reproducible over time.**
+
+        This is useful because Tiingo's own 'adj' values are adjusted to the
+        basis of the prices on the date the data were queried. This means the
+        values for a given query will change over time as more dividend payments
+        and stock splits occur. To get consistent numbers, one must either use
+        the unadjusted columns (and ignore dividends and splits), always query
+        price data until the present day (extra data in order to capture and
+        factor in subsequent corporate actions), or otherwise adjust the
+        unadjusted prices in a reproducible manner (this method).
+
+        NOTE: Past dates' 'adj' values won't exactly match Tiingo's originals,
+        even when a Strategy query includes all corporate actions between the
+        start date and the present. This is almost entirely because Tiingo's
+        unadjusted 'close' column is rounded to 2 decimal places while they use
+        more for their adjustments. However, this is a minuscule discrepancy
+        that doesn't affect Strategy simulations. For example, the Tiingo-
+        provided adjClose on the start date of an AAPL query from 1993-12-27 to
+        2026-03-30 (conducted on the latter date) was 0.02% different in price
+        from this method's adjClose.
+        '''
+        for tkr, val in self.assets.items():
+            df = val['df'].copy()
+            cols = ['close', 'high', 'low', 'open']
+
+            # split factor for each date through reversed cumulative product
+            # (inspiration from https://stackoverflow.com/questions/62130566/)
+            tot_splits = df['splitFactor'][::-1].cumprod()[::-1].shift(-1, fill_value=1.0).values
+            tot_splits_cast = np.tile(tot_splits, (len(cols), 1)).T
+
+            # get prices on dividend ex dates (immediately preceding payday),
+            # excluding any that aren't present in the dataFrame
+            div_dts_all = df[df['divCash'] != 0].index
+            pre_div_inds_all = df.index.get_indexer_for(div_dts_all)
+            pre_div_inds = pre_div_inds_all[pre_div_inds_all > 0]
+            pre_div_prices = df.iloc[pre_div_inds - 1][cols]
+
+            # get pay dates and amounts of remaining dividends
+            div_dts = div_dts_all[pre_div_inds_all > 0]
+            div_amts = df.loc[div_dts, 'divCash'].values
+            div_amts_cast = np.tile(div_amts, (len(cols), 1)).T
+
+            # calculate dividend adjustments on relevant price data
+            # (div_adjs_by_dt[::-1].cumprod()[::-1] == old tot_div_adjs)
+            div_adjs_by_dt = ((pre_div_prices - div_amts_cast) / pre_div_prices)
+
+            # factor each dividend's adj. into all days preceding its payday
+            divFactors = pd.DataFrame(index=df.index, columns=cols,
+                                      data=1, dtype=np.float64)
+            for dt in div_adjs_by_dt.index:
+                divFactors.loc[divFactors.index <= dt] *= div_adjs_by_dt.loc[dt]
+
+            # NOT NEEDED; DIVIDENDS ARE ALREADY BAKED INTO THE ADJUSTMENT
+            # # calculate each dividend's value as shares of previous (unadj.) close
+            # divs_in_shares = df.loc[div_dts, 'divCash'] / pre_div_prices['close'].values
+
+            # # scale each dividend to equivalent per-share value for adjusted prices;
+            # # rename original divCash column and replace with scaled values
+            # val['df']['OG_divCash'] = val['df']['divCash'].copy()
+            # for i, dt in enumerate(divs_in_shares.index):
+            #     val['df'].loc[dt, 'divCash'] = (
+            #         df.loc[df.index[pre_div_inds[i]], 'close']
+            #         * divs_in_shares.loc[dt]
+            #     )
+
+            # copy Tiingo's original adj columns to the end of the column list
+            adj_cols = ['adj' + c.title() for c in cols]
+            old_adj_cols = ['OG_' + c for c in adj_cols]
+            val['df'][old_adj_cols] = val['df'][adj_cols].copy()
+
+            # add the readjusted price columns to the original dataFrame
+            val['df'][adj_cols] = df[cols] / tot_splits_cast * divFactors
+
+        # reset benchmark portfolio starting value to reflect any price changes
+        # (copied from HistoricalSimulator.__init__())
+        self._bench_cash = self.portfolio_value(self.start_date, at_close=False)
+        self._starting_value = self._bench_cash

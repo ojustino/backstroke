@@ -133,15 +133,13 @@ def test_bnh():
     pf1.add_ticker('CPB', 1/3)
     pf1.add_ticker('SPY', 1, label='benchmark')
 
-    # initialize Strategy and swap price columns
+    # initialize Strategy and normalize prices
     bnh = BuyAndHoldStrategy(pf1,
                              start_date=pd.Timestamp(2000, 8, 1),
                              end_date=pd.Timestamp(2016, 1, 1),
                              cash=10000, reinvest_dividends=False,
                              tot_rb_freq=12, target_rb_day=0)
-
-    bnh._rewind_prices = MethodType(_rewind_prices, bnh)
-    bnh._rewind_prices()
+    bnh.normalize_price_bases()
 
     # append another rebalance date to test the process
     nu_prices = {'MCD': 117.25, 'TGT': 71.84, 'CPB': 43.83, 'SPY': 200.49}
@@ -198,15 +196,13 @@ def test_sma():
     pf2.add_ticker('SPY', .6, label='benchmark', track=True)
     pf2.add_ticker('AGG', .4, label='benchmark')
 
-    # initialize Strategy and swap price columns
+    # initialize Strategy and normalize prices
     sma = SMAStrategy(pf2, window=100,
                       start_date=pd.Timestamp(2019, 12, 12),
                       end_date=pd.Timestamp(2020, 8, 13),
                       cash=1738.29, reinvest_dividends=True,
                       sat_rb_freq=365.25, tot_rb_freq=12, target_rb_day=8)
-
-    sma._rewind_prices = MethodType(_rewind_prices, sma)
-    sma._rewind_prices()
+    sma.normalize_price_bases()
 
     # run simulation
     sma.begin_time_loop()
@@ -266,15 +262,13 @@ def test_vlt():
     pf3.add_ticker('TLT', label='satellite', in_market=False)
     pf3.add_ticker('GLD', 1, label='benchmark')
 
-    # initialize Strategy and swap price columns
+    # initialize Strategy and normalize prices
     vlt = VolTargetStrategy(pf3, window=30, vol_target=.15,
                             start_date=pd.Timestamp(2018, 7, 27),
                             end_date=pd.Timestamp(2019, 7, 31),
                             cash=5500, reinvest_dividends=False,
                             sat_rb_freq=12, tot_rb_freq=4, target_rb_day=-3)
-
-    vlt._rewind_prices = MethodType(_rewind_prices, vlt)
-    vlt._rewind_prices()
+    vlt.normalize_price_bases()
 
     # run simulation
     vlt.begin_time_loop()
