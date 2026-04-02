@@ -1,4 +1,5 @@
 #!/usr/bin/python3
+from attr_dict import AttrDict
 from datetime import datetime, timedelta
 from io import BytesIO, TextIOWrapper
 from zipfile import ZipFile
@@ -47,7 +48,8 @@ class PortfolioMaker:
         self._valid_tix = self._fetch_ticker_info()
 
         # set up initial class attributes
-        self.assets = {}
+        self.assets = AttrDict()
+        # allows keys to be called like attrs (e.g., assets['df'] or assets.df)
         self.tick_info = pd.DataFrame()
         # will eventually contain rows of assets selected from valid_tix
 

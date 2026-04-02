@@ -1,4 +1,5 @@
 #!/usr/bin/python3
+from attr_dict import AttrDict
 from better_abc import ABC, abstract_attribute, abstractmethod
 from datetime import timedelta
 from portfolio_maker import PortfolioMaker
@@ -120,8 +121,9 @@ class HistoricalSimulator(ABC):
         # track the current simulation date
         self.today = self.open_date
 
-        # validate proposed asset dictionary, then add historical data to it
-        self.assets = self._validate_assets_dict(Portfolio, verbose)
+        # validate proposed asset dictionary, then add historical data to it.
+        # allow keys to be called like attrs (e.g., assets['df'] or assets.df)
+        self.assets = AttrDict(self._validate_assets_dict(Portfolio, verbose))
 
         # make arrays of all dates in set and all *active* dates
         self.all_dates, self.active_dates = self._get_date_arrays()
