@@ -730,7 +730,7 @@ class VolTargetStrategy(HistoricalSimulator):
         #  decimal.Decimal on self.cash/bench_cash, all entries in
         #  self.assets[tk]['shares'], and can_spend & in/out_mkt_pr here can
         #  prevent that, but it's slower than using floats...)
-        # (Also, for non-mutual funds, when reinvest_dividends=True, need to
+        # (Also, for non-mutual funds, when cash_out_dividends=False, need to
         #  disallow all partial share purchases. Need to do the same for sales,
         #  **except** when all shares are being sold.)
         max_in_sh = int(can_spend / in_mkt_pr)
@@ -738,14 +738,14 @@ class VolTargetStrategy(HistoricalSimulator):
         poss_in_fracs = (in_mkt_pr * poss_in_sh) / can_spend
 
         in_mkt_ideal = np.argmin(np.abs(poss_in_fracs - new_frac_in))
-        if in_mkt_ideal == 0 and self.reinvest_dividends == True:
+        if in_mkt_ideal == 0 and not self.cash_out_dividends:
             # also sell partial shares
             in_mkt_sh = self.assets[in_mkt_tick]['shares']
             my_pr('in_mkt partial shares (if any) will be sold!')
         in_mkt_delta = in_mkt_ideal - in_mkt_sh
 
         out_mkt_ideal = int((can_spend - in_mkt_pr * in_mkt_ideal) / out_mkt_pr)
-        if out_mkt_ideal == 0 and self.reinvest_dividends == True:
+        if out_mkt_ideal == 0 and not self.cash_out_dividends:
             # also sell partial shares
             out_mkt_sh = self.assets[out_mkt_tick]['shares']
             my_pr('out_mkt partial shares (if any) will be sold!')

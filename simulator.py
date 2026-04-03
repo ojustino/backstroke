@@ -66,10 +66,12 @@ class HistoricalSimulator(ABC):
         indexing, so both positive and negative values are acceptable as long as
         their absolute value is 13 or lower. [default: -2]
 
-    reinvest_dividends : boolean, optional
-        When True, any dividends paid out by an asset are used immediately to
-        purchase partial shares of that asset. When False, dividends are taken
-        in as cash and spent on the next rebalance date. [default: False]
+    cash_out_dividends : boolean, optional
+        When True, dividends are taken in as cash and spent on the next
+        rebalance date. When False, any dividends paid out by an asset are used
+        immediately to purchase partial shares of that asset. Can only be True
+        when simulation price data is NOT dividend-adjusted. Otherwise, cashing
+        out isn't possible. [default: False]
 
     verbose : boolean, optional
         Whether or not to print the download's progress. [default: False]
@@ -79,7 +81,7 @@ class HistoricalSimulator(ABC):
                  start_date=pd.Timestamp(2007, 5, 22),
                  end_date=pd.Timestamp(2015, 5, 22),
                  sat_rb_freq=6, tot_rb_freq=1, target_rb_day=-2,
-                 reinvest_dividends=False, verbose=False):
+                 cash_out_dividends=False, verbose=False):
         # make sure a PortfolioMaker object is present
         if not isinstance(Portfolio, PortfolioMaker):
             raise ValueError('The first argument of HistoricalSimulator() must '
@@ -132,7 +134,7 @@ class HistoricalSimulator(ABC):
         self.rb_info = self._calc_rebalance_info(verbose)
 
         # save preference for handling dividend payouts
-        self.reinvest_dividends = reinvest_dividends
+        self.cash_out_dividends = cash_out_dividends
 
         # track remaining money in main and benchmark portfolios
         # (are properties, so an error is thrown if they go negative)
@@ -1012,7 +1014,7 @@ class HistoricalSimulator(ABC):
 
         Checks whether assets currently held in a portfolio are paying out
         dividends on a given day. If so, accepts the dividend as partial shares
-        of that asset if self.reinvest_dividends is True, or as cash if False.
+        of that asset if self.cash_out_dividends is False, or as cash if True.
 
         Note that this check happens before any rebalancing transactions because
         one needs to have owned an asset on the day before the dividend
@@ -1053,7 +1055,7 @@ class HistoricalSimulator(ABC):
                 continue
 
             # barring those, receive the dividend as partial shares or cash
-            if self.reinvest_dividends:
+            if not self.cash_out_dividends:
                 tk_price = self.assets[tk]['df'].loc[self.today, 'adjOpen']
                 partials = shares_held * (div_cash / tk_price)
                 my_pr(f"**** on {self.today.strftime('%Y-%m-%d')}\n"
@@ -1306,7 +1308,7 @@ class HistoricalSimulator(ABC):
 
         plt.show()
 
-    def plot_assets(self, *tickers, start_value=None, reinvest_dividends=False,
+    def plot_assets(self, *tickers, start_value=None, cash_out_dividends=True,
                     logy=False, return_plot=False, verbose=True):
         '''
         View a plot of one or more assets' individual performances over the
@@ -1324,9 +1326,9 @@ class HistoricalSimulator(ABC):
             value is the original value chosen for self.cash when this instance
             was initialized.
 
-        reinvest_dividends : boolean, optional
-            (Coming soon?) If True, reinvests any dividend income back into the
-            asset that paid it out. [default: False]
+        cash_out_dividends : boolean, optional
+            (Coming soon?) If False, reinvests any dividend income back into the
+            asset that paid it out. [default: True]
 
         logy : boolean, optional
             If True, the y-axis (account value in dollars) will have a
@@ -1349,7 +1351,7 @@ class HistoricalSimulator(ABC):
                 raise ValueError(f"{tk} is not part of your list of assets.")
         if start_value is None:
             start_value = self._starting_value
-        if reinvest_dividends:
+        if not cash_out_dividends:
             raise NotImplementedError('Coming soon...')
 
         # make separate colormaps for each ticker label
