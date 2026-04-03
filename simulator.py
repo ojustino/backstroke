@@ -569,8 +569,12 @@ class HistoricalSimulator(ABC):
             info['df'] =  df
 
         # ensure that each asset has the same number of dates
-        num_dates = np.unique([len(assets[nm]['df'].index) for nm in assets])
-        assert len(num_dates) == 1, 'some ticker DataFrames are missing dates'
+        num_dates = [tk['df'].size for tk in assets.values()]
+        if np.unique(num_dates).size != 1:
+            counts_by_ticker = {tk: num_dates[i]
+                                for i, tk in enumerate(assets.keys())}
+            raise ValueError('Ticker dataFrames have unequal numbers of dates: '
+                             f"{counts_by_ticker}")
 
         return assets
 
