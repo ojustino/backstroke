@@ -11,8 +11,6 @@ import pickle
 import requests
 import time
 
-MY_API_KEY = '901a2a03f9d57935c22df22ae5a5377cb8de6f22'
-
 class HistoricalSimulator(ABC):
     '''
     The parent of a Strategy class that does the heavy lifting in simulating
@@ -39,15 +37,15 @@ class HistoricalSimulator(ABC):
         simulation. Note that this is separate from the value of any initial
         shares held in Portfolio.assets. [default: $10,000]
 
-    start_date : `pandas.Timestamp` or `datetime.datetime`, optional
+    start_date : str or `pandas.Timestamp` or `datetime.datetime`, optional
         The first trading date in your simulation. If the market wasn't open on
-        your chosen date, the next market date will be chosen.
-        [default: pandas.Timestamp(2007, 5, 22)]
+        your chosen date, the closest market date afterward will be chosen.
+        [default: '2007-05-22']
 
-    end_date : `pandas.Timestamp` or `datetime.datetime`, optional
+    end_date : str or `pandas.Timestamp` or `datetime.datetime`, optional
         The last trading date in your simulation. If the market wasn't open on
-        your chosen date, the last market date before it will be chosen.
-        [default: pandas.Timestamp(2015, 5, 22)]
+        your chosen date, the closest preceding market date will be chosen.
+        [default: '2015-05-22']
 
     sat_rb_freq : float, optional
         The number of times per year to rebalance the satellite portion of your
@@ -78,8 +76,7 @@ class HistoricalSimulator(ABC):
     '''
     # earliest start dates: 1998-11-22, 2007-05-22, 2012-10-21
     def __init__(self, Portfolio, cash=1e4,
-                 start_date=pd.Timestamp(2007, 5, 22),
-                 end_date=pd.Timestamp(2015, 5, 22),
+                 start_date='2007-05-22', end_date='2015-05-22',
                  sat_rb_freq=6, tot_rb_freq=1, target_rb_day=-2,
                  cash_out_dividends=False, verbose=False):
         # make sure a PortfolioMaker object is present
@@ -110,15 +107,15 @@ class HistoricalSimulator(ABC):
         self.sat_rb_freq = sat_rb_freq
         self.tot_rb_freq = tot_rb_freq
 
+        # save dates over which analysis will take place
+        self.start_date = pd.Timestamp(start_date)
+        self.end_date = pd.Timestamp(end_date)
+
         # estimate period needed to warm up strategy's statistic(s) (converting
         # real days to approx. market days) and subtract result from start_date
         mkt_to_real_days = 365.25 / 252.75 # denominator is avg mkt days in year
         buffer_days = int(self.window * mkt_to_real_days) + 5
-        self.open_date = pd.Timestamp(start_date - timedelta(buffer_days))
-
-        # save dates over which analysis will take place
-        self.start_date = pd.Timestamp(start_date)
-        self.end_date = pd.Timestamp(end_date)
+        self.open_date = pd.Timestamp(self.start_date - timedelta(buffer_days))
 
         # track the current simulation date
         self.today = self.open_date
@@ -356,7 +353,7 @@ class HistoricalSimulator(ABC):
             'endDate': end_date,
             'format': 'json',
             'resampleFreq': 'daily',
-            'token': MY_API_KEY,
+            'token': for_tiingo,
         }
 
         resp = requests.get(url, params=params, headers=headers)
@@ -1508,3 +1505,11 @@ class HistoricalSimulator(ABC):
         # (copied from HistoricalSimulator.__init__())
         self._bench_cash = self.portfolio_value(self.start_date, at_close=False)
         self._starting_value = self._bench_cash
+
+
+try:
+    from dotenv import dotenv_values, load_dotenv
+    for_tiingo = dotenv_values()['tiingo']
+except KeyError:
+    import os
+    for_tiingo = os.getenv('tiingo')
