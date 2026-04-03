@@ -11,8 +11,6 @@ import pickle
 import requests
 import time
 
-MY_API_KEY = '901a2a03f9d57935c22df22ae5a5377cb8de6f22'
-
 class HistoricalSimulator(ABC):
     '''
     The parent of a Strategy class that does the heavy lifting in simulating
@@ -39,15 +37,15 @@ class HistoricalSimulator(ABC):
         simulation. Note that this is separate from the value of any initial
         shares held in Portfolio.assets. [default: $10,000]
 
-    start_date : `pandas.Timestamp` or `datetime.datetime`, optional
+    start_date : str or `pandas.Timestamp` or `datetime.datetime`, optional
         The first trading date in your simulation. If the market wasn't open on
-        your chosen date, the next market date will be chosen.
-        [default: pandas.Timestamp(2007, 5, 22)]
+        your chosen date, the closest market date afterward will be chosen.
+        [default: '2007-05-22']
 
-    end_date : `pandas.Timestamp` or `datetime.datetime`, optional
+    end_date : str or `pandas.Timestamp` or `datetime.datetime`, optional
         The last trading date in your simulation. If the market wasn't open on
-        your chosen date, the last market date before it will be chosen.
-        [default: pandas.Timestamp(2015, 5, 22)]
+        your chosen date, the closest preceding market date will be chosen.
+        [default: '2015-05-22']
 
     sat_rb_freq : float, optional
         The number of times per year to rebalance the satellite portion of your
@@ -66,20 +64,21 @@ class HistoricalSimulator(ABC):
         indexing, so both positive and negative values are acceptable as long as
         their absolute value is 13 or lower. [default: -2]
 
-    reinvest_dividends : boolean, optional
-        When True, any dividends paid out by an asset are used immediately to
-        purchase partial shares of that asset. When False, dividends are taken
-        in as cash and spent on the next rebalance date. [default: False]
+    cash_out_dividends : boolean, optional
+        When True, dividends are taken in as cash and spent on the next
+        rebalance date. When False, any dividends paid out by an asset are used
+        immediately to purchase partial shares of that asset. Can only be True
+        when simulation price data is NOT dividend-adjusted. Otherwise, cashing
+        out isn't possible. [default: False]
 
     verbose : boolean, optional
         Whether or not to print the download's progress. [default: False]
     '''
     # earliest start dates: 1998-11-22, 2007-05-22, 2012-10-21
     def __init__(self, Portfolio, cash=1e4,
-                 start_date=pd.Timestamp(2007, 5, 22),
-                 end_date=pd.Timestamp(2015, 5, 22),
+                 start_date='2007-05-22', end_date='2015-05-22',
                  sat_rb_freq=6, tot_rb_freq=1, target_rb_day=-2,
-                 reinvest_dividends=False, verbose=False):
+                 cash_out_dividends=False, verbose=False):
         # make sure a PortfolioMaker object is present
         if not isinstance(Portfolio, PortfolioMaker):
             raise ValueError('The first argument of HistoricalSimulator() must '
@@ -108,15 +107,15 @@ class HistoricalSimulator(ABC):
         self.sat_rb_freq = sat_rb_freq
         self.tot_rb_freq = tot_rb_freq
 
+        # save dates over which analysis will take place
+        self.start_date = pd.Timestamp(start_date)
+        self.end_date = pd.Timestamp(end_date)
+
         # estimate period needed to warm up strategy's statistic(s) (converting
         # real days to approx. market days) and subtract result from start_date
         mkt_to_real_days = 365.25 / 252.75 # denominator is avg mkt days in year
         buffer_days = int(self.window * mkt_to_real_days) + 5
-        self.open_date = pd.Timestamp(start_date - timedelta(buffer_days))
-
-        # save dates over which analysis will take place
-        self.start_date = pd.Timestamp(start_date)
-        self.end_date = pd.Timestamp(end_date)
+        self.open_date = pd.Timestamp(self.start_date - timedelta(buffer_days))
 
         # track the current simulation date
         self.today = self.open_date
@@ -132,7 +131,7 @@ class HistoricalSimulator(ABC):
         self.rb_info = self._calc_rebalance_info(verbose)
 
         # save preference for handling dividend payouts
-        self.reinvest_dividends = reinvest_dividends
+        self.cash_out_dividends = cash_out_dividends
 
         # track remaining money in main and benchmark portfolios
         # (are properties, so an error is thrown if they go negative)
@@ -354,7 +353,7 @@ class HistoricalSimulator(ABC):
             'endDate': end_date,
             'format': 'json',
             'resampleFreq': 'daily',
-            'token': MY_API_KEY,
+            'token': for_tiingo,
         }
 
         resp = requests.get(url, params=params, headers=headers)
@@ -567,8 +566,12 @@ class HistoricalSimulator(ABC):
             info['df'] =  df
 
         # ensure that each asset has the same number of dates
-        num_dates = np.unique([len(assets[nm]['df'].index) for nm in assets])
-        assert len(num_dates) == 1, 'some ticker DataFrames are missing dates'
+        num_dates = [tk['df'].size for tk in assets.values()]
+        if np.unique(num_dates).size != 1:
+            counts_by_ticker = {tk: num_dates[i]
+                                for i, tk in enumerate(assets.keys())}
+            raise ValueError('Ticker dataFrames have unequal numbers of dates: '
+                             f"{counts_by_ticker}")
 
         return assets
 
@@ -1012,7 +1015,7 @@ class HistoricalSimulator(ABC):
 
         Checks whether assets currently held in a portfolio are paying out
         dividends on a given day. If so, accepts the dividend as partial shares
-        of that asset if self.reinvest_dividends is True, or as cash if False.
+        of that asset if self.cash_out_dividends is False, or as cash if True.
 
         Note that this check happens before any rebalancing transactions because
         one needs to have owned an asset on the day before the dividend
@@ -1053,7 +1056,7 @@ class HistoricalSimulator(ABC):
                 continue
 
             # barring those, receive the dividend as partial shares or cash
-            if self.reinvest_dividends:
+            if not self.cash_out_dividends:
                 tk_price = self.assets[tk]['df'].loc[self.today, 'adjOpen']
                 partials = shares_held * (div_cash / tk_price)
                 my_pr(f"**** on {self.today.strftime('%Y-%m-%d')}\n"
@@ -1306,7 +1309,7 @@ class HistoricalSimulator(ABC):
 
         plt.show()
 
-    def plot_assets(self, *tickers, start_value=None, reinvest_dividends=False,
+    def plot_assets(self, *tickers, start_value=None, cash_out_dividends=True,
                     logy=False, return_plot=False, verbose=True):
         '''
         View a plot of one or more assets' individual performances over the
@@ -1324,9 +1327,9 @@ class HistoricalSimulator(ABC):
             value is the original value chosen for self.cash when this instance
             was initialized.
 
-        reinvest_dividends : boolean, optional
-            (Coming soon?) If True, reinvests any dividend income back into the
-            asset that paid it out. [default: False]
+        cash_out_dividends : boolean, optional
+            (Coming soon?) If False, reinvests any dividend income back into the
+            asset that paid it out. [default: True]
 
         logy : boolean, optional
             If True, the y-axis (account value in dollars) will have a
@@ -1349,7 +1352,7 @@ class HistoricalSimulator(ABC):
                 raise ValueError(f"{tk} is not part of your list of assets.")
         if start_value is None:
             start_value = self._starting_value
-        if reinvest_dividends:
+        if not cash_out_dividends:
             raise NotImplementedError('Coming soon...')
 
         # make separate colormaps for each ticker label
@@ -1418,3 +1421,95 @@ class HistoricalSimulator(ABC):
             return ax
 
         plt.show()
+
+    def normalize_price_bases(self):
+        '''
+        Takes a dataFrame from a symbol's 'df' key in the `assets` dictionary of
+        a Strategy instance (e.g. sim.assets['AAPL']['df']) and adjusts the
+        dataFrame's 'adj' columns (close, high, low, open) to the basis of the
+        prices on the Strategy instance's end date. **This makes simulation
+        results reproducible over time.**
+
+        This is useful because Tiingo's own 'adj' values are adjusted to the
+        basis of the prices on the date the data were queried. This means the
+        values for a given query will change over time as more dividend payments
+        and stock splits occur. To get consistent numbers, one must either use
+        the unadjusted columns (and ignore dividends and splits), always query
+        price data until the present day (extra data in order to capture and
+        factor in subsequent corporate actions), or otherwise adjust the
+        unadjusted prices in a reproducible manner (this method).
+
+        NOTE: Past dates' 'adj' values won't exactly match Tiingo's originals,
+        even when a Strategy query includes all corporate actions between the
+        start date and the present. This is almost entirely because Tiingo's
+        unadjusted 'close' column is rounded to 2 decimal places while they use
+        more for their adjustments. However, this is a minuscule discrepancy
+        that doesn't affect Strategy simulations. For example, the Tiingo-
+        provided adjClose on the start date of an AAPL query from 1993-12-27 to
+        2026-03-30 (conducted on the latter date) was 0.02% different in price
+        from this method's adjClose.
+        '''
+        for tkr, val in self.assets.items():
+            df = val['df'].copy()
+            cols = ['close', 'high', 'low', 'open']
+
+            # split factor for each date through reversed cumulative product
+            # (inspiration from https://stackoverflow.com/questions/62130566/)
+            tot_splits = df['splitFactor'][::-1].cumprod()[::-1].shift(-1, fill_value=1.0).values
+            tot_splits_cast = np.tile(tot_splits, (len(cols), 1)).T
+
+            # get prices on dividend ex dates (immediately preceding payday),
+            # excluding any that aren't present in the dataFrame
+            div_dts_all = df[df['divCash'] != 0].index
+            pre_div_inds_all = df.index.get_indexer_for(div_dts_all)
+            pre_div_inds = pre_div_inds_all[pre_div_inds_all > 0]
+            pre_div_prices = df.iloc[pre_div_inds - 1][cols]
+
+            # get pay dates and amounts of remaining dividends
+            div_dts = div_dts_all[pre_div_inds_all > 0]
+            div_amts = df.loc[div_dts, 'divCash'].values
+            div_amts_cast = np.tile(div_amts, (len(cols), 1)).T
+
+            # calculate dividend adjustments on relevant price data
+            # (div_adjs_by_dt[::-1].cumprod()[::-1] == old tot_div_adjs)
+            div_adjs_by_dt = ((pre_div_prices - div_amts_cast) / pre_div_prices)
+
+            # factor each dividend's adj. into all days preceding its payday
+            divFactors = pd.DataFrame(index=df.index, columns=cols,
+                                      data=1, dtype=np.float64)
+            for dt in div_adjs_by_dt.index:
+                divFactors.loc[divFactors.index <= dt] *= div_adjs_by_dt.loc[dt]
+
+            # NOT NEEDED; DIVIDENDS ARE ALREADY BAKED INTO THE ADJUSTMENT
+            # # calculate each dividend's value as shares of previous (unadj.) close
+            # divs_in_shares = df.loc[div_dts, 'divCash'] / pre_div_prices['close'].values
+
+            # # scale each dividend to equivalent per-share value for adjusted prices;
+            # # rename original divCash column and replace with scaled values
+            # val['df']['OG_divCash'] = val['df']['divCash'].copy()
+            # for i, dt in enumerate(divs_in_shares.index):
+            #     val['df'].loc[dt, 'divCash'] = (
+            #         df.loc[df.index[pre_div_inds[i]], 'close']
+            #         * divs_in_shares.loc[dt]
+            #     )
+
+            # copy Tiingo's original adj columns to the end of the column list
+            adj_cols = ['adj' + c.title() for c in cols]
+            old_adj_cols = ['OG_' + c for c in adj_cols]
+            val['df'][old_adj_cols] = val['df'][adj_cols].copy()
+
+            # add the readjusted price columns to the original dataFrame
+            val['df'][adj_cols] = df[cols] / tot_splits_cast * divFactors
+
+        # reset benchmark portfolio starting value to reflect any price changes
+        # (copied from HistoricalSimulator.__init__())
+        self._bench_cash = self.portfolio_value(self.start_date, at_close=False)
+        self._starting_value = self._bench_cash
+
+
+try:
+    from dotenv import dotenv_values, load_dotenv
+    for_tiingo = dotenv_values()['tiingo']
+except KeyError:
+    import os
+    for_tiingo = os.getenv('tiingo')
