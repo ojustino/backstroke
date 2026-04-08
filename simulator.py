@@ -161,6 +161,10 @@ class HistoricalSimulator(ABC):
         self.bench_names = [key for key, info in self.assets.items()
                             if info['label'] == 'benchmark']
 
+        # track whether prices have been normalized by user
+        self._div_scaled_prices = None
+        self._split_scaled_prices = None
+
         # run the loop?
 
     @property
@@ -1011,7 +1015,9 @@ class HistoricalSimulator(ABC):
 
     def _check_dividends(self, main_portfolio=True, verbose=False):
         '''
-        Called in self.begin_time_loop().
+        Called in self.begin_time_loop(). Only relevant when price data does not
+        inherently include the effects of dividends [e.g., user called
+        normalize_price_data(by_dividends=False) before simulation].
 
         Checks whether assets currently held in a portfolio are paying out
         dividends on a given day. If so, accepts the dividend as partial shares
@@ -1073,6 +1079,49 @@ class HistoricalSimulator(ABC):
                 else:
                     self.bench_cash += add_cash
 
+    def _check_splits(self, main_portfolio=True, verbose=False):
+        '''
+        Called in self.begin_time_loop(). Only relevant when price data does not
+        inherently include the effects of stock splits [e.g., user called normalize_price_data(by_splits=False) before simulation].
+
+        Checks whether assets currently held in a portfolio are undergoing a
+        stock split on a given day. If so, adjusts the portfolio's number of
+        shares held accordingly.
+
+        Arguments
+        ---------
+
+        main_portfolio : boolean, optional
+            If True, checks the main strategy's core/satellite portfolio.
+            If False, checks the benchmark portfolio. [default: True]
+
+        verbose : boolean, optional
+            If True, prints information when splits occur in the simulation.
+            [default: False]
+        '''
+        my_pr = lambda *args, **kwargs: (print(*args, **kwargs)
+                                         if verbose else None)
+
+        # choose assets to check for stock splits
+        tickers = (self.core_names + self.sat_names if main_portfolio
+                   else self.bench_names)
+
+        # check each asset for a stock split on the indicated day
+        for tk in tickers:
+            # if there's none, skip to the next ticker
+            split_factor = self.assets[tk]['df'].loc[self.today, 'splitFactor']
+            if split_factor == 1:
+                continue
+
+            # if this ticker isn't currently in the portfolio, skip to the next
+            shares_held = self.assets[tk]['shares']
+            if shares_held == 0:
+                continue
+
+            # barring those, adjust the number of shares
+            # (e.g., for a 4-to-1 split, splitFactor == 0.25)
+            self.assets[tk]['shares'] *= split_factor
+
     def begin_time_loop(self, verbose=False):
         '''
         Called in __init__ of HistoricalSimulator or by user????
@@ -1094,6 +1143,30 @@ class HistoricalSimulator(ABC):
         my_pr = lambda *args, **kwargs: (print(*args, **kwargs)
                                          if verbose else None)
 
+        # ensure dividend reinvestment choice makes sense
+        if self._div_scaled_prices is None:
+            # using Tiingo-adjusted prices, which include effects of dividends
+            implicit_dividends = True
+        else:
+            # normalize_price_bases() used; maybe includes dividend effects
+            implicit_dividends = self._div_scaled_prices
+
+        if self.cash_out_dividends and implicit_dividends:
+            raise ValueError("cash_out_dividends is True, but loop cannot "
+                             "cash them out when adjusted price data "
+                             "inherently includes dividend effects. Either a) "
+                             "set cash_out_dividends to False, or b) call "
+                             "`normalize_price_bases(by_dividends=False)`. "
+                             "Then, try begin_time_loop() again.")
+
+        # decide whether the simulator should handle splits manually (UNCOMMON)
+        if self._split_scaled_prices is None:
+            # using Tiingo-adjusted prices, which include effects of splits
+            implicit_splits = True
+        else:
+            # normalize_price_bases() used; maybe includes split effects
+            implicit_splits = self._split_scaled_prices
+
         # make lists to track values over time
         to_strategy_results = []
         to_bench_results = []
@@ -1107,11 +1180,17 @@ class HistoricalSimulator(ABC):
             if self.today >= self.start_date:
                 self.on_new_day()
 
-            # "PRE-OPEN": cash in dividends from ex-date (YESTERDAY's) holdings,
-            # once for main portfolio and once for benchmark
-            if self.today >= self.start_date:
+            # "PRE-OPEN": if simulator handles dividends, cash them based on ex-
+            # date (YESTERDAY's) holdings. main portfolio first, then benchmark
+            if self.today >= self.start_date and not implicit_dividends:
                 self._check_dividends(verbose=verbose)
                 self._check_dividends(main_portfolio=False, verbose=False)
+
+            # "PRE-OPEN": if simulator handles stock splits (UNCOMMON), update
+            # portfolio share counts if any occurred today
+            if self.today >= self.start_date and not implicit_splits:
+                self._check_splits(verbose=verbose)
+                self._check_splits(main_portfolio=False, verbose=False)
 
             # AT OPEN: rebalance if needed
             if self.today in self.rb_info.index: # 2x faster than check by index
@@ -1422,13 +1501,31 @@ class HistoricalSimulator(ABC):
 
         plt.show()
 
-    def normalize_price_bases(self):
+    def normalize_price_bases(self, by_dividends=True, by_splits=True):
         '''
-        Takes a dataFrame from a symbol's 'df' key in the `assets` dictionary of
-        a Strategy instance (e.g. sim.assets['AAPL']['df']) and adjusts the
-        dataFrame's 'adj' columns (close, high, low, open) to the basis of the
-        prices on the Strategy instance's end date. **This makes simulation
-        results reproducible over time.**
+        Adjusts all dataFrames in the `assets` dictionary of a Strategy instance
+        (e.g. sim.assets['AAPL']['df']) so their 'adj' columns (close, high,
+        low, open) are normalized to the bases of the prices on the Strategy
+        instance's end date. **This makes simulation results reproducible over
+        time.**
+
+        For desired behavior, run before self.begin_time_loop().
+
+        Arguments
+        ---------
+
+        by_dividends : boolean, optional
+            Whether to normalize by dividend payments. If True, dividend
+            payments will be ignored in the simulation since the adjustment will
+            already account for them (same as default behavior with Tiingo
+            adjustments). If False, the simulation will account for dividends.
+            [default: True]
+
+        by_splits : boolean, optional
+            Whether to normalize by stock splits. If True, stock splits will be
+            ignored in the simulation since the adjustment will already account
+            for them (same as default behavior with Tiingo adjustments). If
+            False, the simulation will account for splits. [default: True]
 
         This is useful because Tiingo's own 'adj' values are adjusted to the
         basis of the prices on the date the data were queried. This means the
@@ -1449,36 +1546,43 @@ class HistoricalSimulator(ABC):
         2026-03-30 (conducted on the latter date) was 0.02% different in price
         from this method's adjClose.
         '''
+        cols = ['close', 'high', 'low', 'open']
         for tkr, val in self.assets.items():
             df = val['df'].copy()
-            cols = ['close', 'high', 'low', 'open']
 
-            # split factor for each date through reversed cumulative product
-            # (inspiration from https://stackoverflow.com/questions/62130566/)
-            tot_splits = df['splitFactor'][::-1].cumprod()[::-1].shift(-1, fill_value=1.0).values
-            tot_splits_cast = np.tile(tot_splits, (len(cols), 1)).T
+            if by_splits:
+                # split factor for each date through reversed cumulative product
+                # (inspiration from https://stackoverflow.com/q/62130566/)
+                tot_splits = df['splitFactor'][::-1].cumprod()[::-1].shift(-1, fill_value=1.0).values
+                tot_splits_cast = np.tile(tot_splits, (len(cols), 1)).T
+            else:
+                tot_splits_cast = 1.0
 
-            # get prices on dividend ex dates (immediately preceding payday),
-            # excluding any that aren't present in the dataFrame
-            div_dts_all = df[df['divCash'] != 0].index
-            pre_div_inds_all = df.index.get_indexer_for(div_dts_all)
-            pre_div_inds = pre_div_inds_all[pre_div_inds_all > 0]
-            pre_div_prices = df.iloc[pre_div_inds - 1][cols]
+            if by_dividends:
+                # get prices on dividend ex dates (immediately preceding payday)
+                # while excluding any that aren't present in the dataFrame
+                div_dts_all = df[df['divCash'] != 0].index
+                pre_div_inds_all = df.index.get_indexer_for(div_dts_all)
+                pre_div_inds = pre_div_inds_all[pre_div_inds_all > 0]
+                pre_div_prices = df.iloc[pre_div_inds - 1][cols]
 
-            # get pay dates and amounts of remaining dividends
-            div_dts = div_dts_all[pre_div_inds_all > 0]
-            div_amts = df.loc[div_dts, 'divCash'].values
-            div_amts_cast = np.tile(div_amts, (len(cols), 1)).T
+                # get pay dates and amounts of remaining dividends
+                div_dts = div_dts_all[pre_div_inds_all > 0]
+                div_amts = df.loc[div_dts, 'divCash'].values
+                div_amts_cast = np.tile(div_amts, (len(cols), 1)).T
 
-            # calculate dividend adjustments on relevant price data
-            # (div_adjs_by_dt[::-1].cumprod()[::-1] == old tot_div_adjs)
-            div_adjs_by_dt = ((pre_div_prices - div_amts_cast) / pre_div_prices)
+                # calculate dividend adjustments on relevant price data
+                # (div_adjs_by_dt[::-1].cumprod()[::-1] == old tot_div_adjs)
+                div_adjs_by_dt = ((pre_div_prices - div_amts_cast)
+                                  / pre_div_prices)
 
-            # factor each dividend's adj. into all days preceding its payday
-            divFactors = pd.DataFrame(index=df.index, columns=cols,
-                                      data=1, dtype=np.float64)
-            for dt in div_adjs_by_dt.index:
-                divFactors.loc[divFactors.index <= dt] *= div_adjs_by_dt.loc[dt]
+                # factor each dividend's adj. into all days preceding its payday
+                divFactors = pd.DataFrame(index=df.index, columns=cols,
+                                          data=1, dtype=np.float64)
+                for dt in div_adjs_by_dt.index:
+                    divFactors.loc[divFactors.index <= dt] *= div_adjs_by_dt.loc[dt]
+            else:
+                divFactors = 1.0
 
             # NOT NEEDED; DIVIDENDS ARE ALREADY BAKED INTO THE ADJUSTMENT
             # # calculate each dividend's value as shares of previous (unadj.) close
@@ -1496,15 +1600,38 @@ class HistoricalSimulator(ABC):
             # copy Tiingo's original adj columns to the end of the column list
             adj_cols = ['adj' + c.title() for c in cols]
             old_adj_cols = ['OG_' + c for c in adj_cols]
-            val['df'][old_adj_cols] = val['df'][adj_cols].copy()
+            if not any(col in df.columns for col in old_adj_cols):
+                # don't overwrite if cols exist from a previous standardization
+                val['df'][old_adj_cols] = val['df'][adj_cols].copy()
 
             # add the readjusted price columns to the original dataFrame
             val['df'][adj_cols] = df[cols] / tot_splits_cast * divFactors
+
+        # update price adjustment trackers
+        self._div_scaled_prices = by_dividends
+        self._split_scaled_prices = by_splits
 
         # reset benchmark portfolio starting value to reflect any price changes
         # (copied from HistoricalSimulator.__init__())
         self._bench_cash = self.portfolio_value(self.start_date, at_close=False)
         self._starting_value = self._bench_cash
+
+    def undo_normalize_price_bases(self):
+        '''
+        Reverse the effects of self.normalize_price_bases(), restoring 'adj'
+        columns (close, high, low, open) of the dataFrames in the `assets`
+        dictionary of a Strategy instance to original values from the download
+        (which follow Tiingo's adjustments).
+        '''
+        adj_cols = ['adjClose', 'adjHigh', 'adjLow', 'adjOpen']
+        for tkr, val in self.assets.items():
+            old_adj_cols = ['OG_' + c for c in adj_cols]
+            val['df'][adj_cols] = val['df'][old_adj_cols].copy()
+            val['df'].drop(columns=old_adj_cols)
+
+        # update price adjustment trackers
+        self._div_scaled_prices = None
+        self._split_scaled_prices = None
 
 
 try:

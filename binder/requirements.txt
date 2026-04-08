@@ -1,6 +1,6 @@
 # required packages for backstroke
 matplotlib>=3
-numpy<2.3  # up to date as of 1/2025
-pandas<2.3  # up to date as of 1/2025
+numpy<2.3  # up to date as of 1/2025. v2.3 requires py >3.10. seems OK otherwise
+pandas<2.3  # up to date as of 1/2025. v2.3 looks OK if no copy-on-write issues. v3 requires py >3.10 but seems OK otherwise
 requests>=2.32.2
 python-dotenv

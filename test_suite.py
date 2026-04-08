@@ -137,9 +137,9 @@ def test_bnh():
     bnh = BuyAndHoldStrategy(pf1,
                              start_date=pd.Timestamp(2000, 8, 1),
                              end_date=pd.Timestamp(2016, 1, 1),
-                             cash=10000, reinvest_dividends=False,
+                             cash=10000, cash_out_dividends=True,
                              tot_rb_freq=12, target_rb_day=0)
-    bnh.normalize_price_bases()
+    bnh.normalize_price_bases(by_dividends=False)
 
     # append another rebalance date to test the process
     nu_prices = {'MCD': 117.25, 'TGT': 71.84, 'CPB': 43.83, 'SPY': 200.49}
@@ -200,7 +200,7 @@ def test_sma():
     sma = SMAStrategy(pf2, window=100,
                       start_date=pd.Timestamp(2019, 12, 12),
                       end_date=pd.Timestamp(2020, 8, 13),
-                      cash=1738.29, reinvest_dividends=True,
+                      cash=1738.29, cash_out_dividends=False,
                       sat_rb_freq=365.25, tot_rb_freq=12, target_rb_day=8)
     sma.normalize_price_bases()
 
@@ -248,7 +248,7 @@ def test_vlt():
     Deals with VolTargetStrategy. In addition to common focuses, also tests
     HistoricalSimulator's plot_results.
 
-    NOTE: VolTargetStrategy has problems when reinvest_dividends=True because
+    NOTE: VolTargetStrategy has problems when cash_out_dividends=False because
     it can mostly only sell whole shares. When fractions build up, it thinks
     there's $$ to spend that actually can't be touched unless it's entirely
     liquidating an asset that has fractional shares. it could really use a
@@ -266,9 +266,9 @@ def test_vlt():
     vlt = VolTargetStrategy(pf3, window=30, vol_target=.15,
                             start_date=pd.Timestamp(2018, 7, 27),
                             end_date=pd.Timestamp(2019, 7, 31),
-                            cash=5500, reinvest_dividends=False,
+                            cash=5500, cash_out_dividends=True,
                             sat_rb_freq=12, tot_rb_freq=4, target_rb_day=-3)
-    vlt.normalize_price_bases()
+    vlt.normalize_price_bases(by_dividends=False)
 
     # run simulation
     vlt.begin_time_loop()

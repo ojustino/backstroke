@@ -36,7 +36,6 @@ Now, I actually use a `Strategy` class to make decisions for my IRA.
 
 **Skills used:**
 <br>
-_(bear with me; I'm job-hunting)_
 
 data(Frame) manipulation with `pandas`, fetching data over HTTP with `requests`,
 object-oriented programming with abstract base classes, visualization with
