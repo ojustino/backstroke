@@ -278,7 +278,7 @@ class HistoricalSimulator(ABC):
         Arguments
         ---------
 
-        date : `pandas.Timestamp` or `datetime.datetime`, optional
+        date : str or `pandas.Timestamp` or `datetime.datetime`, optional
             The date whose price data is used in the value calculation. Will
             cause an error if the date is not between the class' open and close
             dates or if it is not a market day. [default: self.today]
@@ -297,7 +297,7 @@ class HistoricalSimulator(ABC):
             raise ValueError("'at_close' must be a bool.")
 
         # ensure that the requested date is within the class instance's range
-        date = self.today if date is None else date
+        date = self.today if date is None else pd.Timestamp(date)
         if not self.open_date <= date <= self.end_date:
             raise ValueError("`date` must occur between `self.open_date` and "
                              "`self.end_date`")
@@ -332,12 +332,12 @@ class HistoricalSimulator(ABC):
         tick : str, required
             The ticker of the asset whose data will be downloaded.
 
-        open_date : `pandas.Timestamp` or `datetime.datetime`, required
+        open_date : str or `pandas.Timestamp` or `datetime.datetime`, required
             The earliest date of historical data to be downloaded. (Note that
             when this method is called upon initializing HistoricalSimulator,
             this argument is self.open_date, not self.start_date.)
 
-        end_date : `pandas.Timestamp` or `datetime.datetime`, optional
+        end_date : str or `pandas.Timestamp` or `datetime.datetime`, optional
             The final date of historical data to be downloaded. (When this
             method is called upon initializing HistoricalSimulator, this
             argument is self.end_date.) [default: pandas.Timestamp.today()]
@@ -345,8 +345,9 @@ class HistoricalSimulator(ABC):
         verbose : boolean, optional
             Whether or not to print the download's progress. [default: True]
         '''
-        open_date = open_date.strftime('%Y-%m-%d') # (e.g. '1998-07-13')
-        end_date = end_date.strftime('%Y-%m-%d')
+        open_date = pd.Timestamp(open_date).strftime('%Y-%m-%d')
+        end_date = pd.Timestamp(end_date).strftime('%Y-%m-%d')
+        # (e.g. '1998-07-13')
         if verbose:
             print(f"{tick} from {open_date} to {end_date}...")
 
@@ -383,7 +384,7 @@ class HistoricalSimulator(ABC):
         Arguments
         ---------
 
-        date : `pandas.Timestamp` or `datetime.datetime`, required
+        date : str or `pandas.Timestamp` or `datetime.datetime`, required
             The new date to add to the simulation. Must be a weekday and must
             not be timezone-aware.
 
